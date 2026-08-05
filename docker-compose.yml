@@ -1,0 +1,22 @@
+services:
+  hls-mcp:
+    build: .
+    image: hls-mcp:latest
+    container_name: hls-mcp
+    restart: unless-stopped
+    ports:
+      - "8004:8004"
+    volumes:
+      - /home/dh/hls_data:/data
+      - /home/dh/hls/HLS:/src:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HLS_SRC_CSV=/src/hls_articles.csv
+      - HLS_OUT_DB=/data/hls.db
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('localhost', 8004), 3).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

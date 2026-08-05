@@ -1,0 +1,4 @@
+hls.db
+*.db
+*.db-shm
+*.db-wal
