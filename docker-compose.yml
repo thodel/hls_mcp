@@ -13,6 +13,10 @@ services:
       - PYTHONUNBUFFERED=1
       - HLS_SRC_CSV=/src/hls_articles.csv
       - HLS_OUT_DB=/data/hls.db
+      # The server answers on its *public* path so nginx can proxy_pass without
+      # rewriting. Change this together with the nginx location block; the two
+      # must agree exactly or every request 404s.
+      - HLS_HTTP_PATH=${HLS_HTTP_PATH:-/mcp/hls/mcp}
     healthcheck:
       test: ["CMD", "python", "-c",
              "import socket; socket.create_connection(('localhost', 8004), 3).close()"]
