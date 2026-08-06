@@ -32,11 +32,21 @@ docker compose up -d
 ```
 
 The endpoint is `http://localhost:8004/mcp` by default, and whatever `--http-path`
-says otherwise — see [Transport](#transport). Connect a client with:
+says otherwise — see [Transport](#transport).
+
+Connect Claude Code with — note the name and URL are positional, there is no `--url`
+flag:
 
 ```bash
-claude mcp add hls --transport http --url http://<server-ip>:8004/mcp
+claude mcp add --transport http hls http://<server-ip>:8004/mcp -s user
 ```
+
+`-s user` makes the server available in every project; `-s project` writes it to
+`.mcp.json` to share with a repository. In Claude Desktop, Cowork or claude.ai, use
+Customize → Connectors → **+** → *Add custom connector* with the same URL; those
+clients connect from Anthropic's cloud, so the server must be reachable over the public
+internet. In a `.mcp.json` the entry is `{"type": "http", "url": "…"}` — a `url`
+without a `type` is read as a stdio server and skipped.
 
 ## Tools
 
