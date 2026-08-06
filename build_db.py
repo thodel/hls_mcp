@@ -5,6 +5,8 @@ Run once to populate /data/hls.db inside the container.
 """
 import csv, os, sys, sqlite3
 
+import db as db_module
+
 SRC_CSV = os.environ.get("HLS_SRC_CSV", "/src/hls_articles.csv")
 OUT_DB  = os.environ.get("HLS_OUT_DB",  "/data/hls.db")
 BATCH   = 5000
@@ -22,58 +24,7 @@ def build_db():
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous  = NORMAL")
 
-    conn.execute("""
-        CREATE TABLE articles (
-            id            TEXT    PRIMARY KEY,
-            version       TEXT,
-            title         TEXT    NOT NULL,
-            content_html  TEXT,
-            content_text  TEXT,
-            time_span     TEXT,
-            orig_time     TEXT,
-            category      TEXT,
-            lexical_class TEXT,
-            orig_lexical  TEXT,
-            place_class   TEXT,
-            orig_place    TEXT,
-            lat           REAL,
-            lon           REAL,
-            birth_date    TEXT,
-            death_date    TEXT,
-            family_name   TEXT,
-            additional    TEXT,
-            first_name    TEXT,
-            gender        TEXT
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE persons (
-            id          TEXT PRIMARY KEY,
-            article_id  TEXT REFERENCES articles(id),
-            family_name TEXT,
-            first_name  TEXT,
-            additional  TEXT,
-            birth_date  TEXT,
-            death_date  TEXT,
-            gender      TEXT,
-            category    TEXT
-        )
-    """)
-
-    conn.execute("""
-        CREATE VIRTUAL TABLE articles_fts USING fts5(
-            id UNINDEXED, title, content_text, category,
-            lexical_class, family_name, first_name,
-            content=articles, content_rowid=rowid
-        )
-    """)
-
-    conn.execute("CREATE INDEX ix_articles_category ON articles(category)")
-    conn.execute("CREATE INDEX ix_articles_lexical  ON articles(lexical_class)")
-    conn.execute("CREATE INDEX ix_articles_family   ON articles(family_name)")
-    conn.execute("CREATE INDEX ix_persons_article   ON persons(article_id)")
-    conn.execute("CREATE INDEX ix_persons_family    ON persons(family_name)")
+    conn.executescript(db_module.SCHEMA_SQL)
 
     reader = csv.DictReader(open(SRC_CSV, encoding="utf-8", errors="replace"))
     rows_buf, persons_buf = [], []

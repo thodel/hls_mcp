@@ -1,4 +1,4 @@
-"""server.py — HLS MCP server (mcp 2.0 MCPServer, SSE transport)."""
+"""server.py — HLS MCP server (mcp 2.0 MCPServer, streamable HTTP)."""
 import argparse, json, logging, os
 from mcp.server.mcpserver import MCPServer
 import db as db_module
@@ -9,7 +9,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB   = os.environ.get("HLS_DB",   "/data/hls.db")
 DEFAULT_HOST = os.environ.get("HLS_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.environ.get("HLS_PORT", "8004"))
-SSE_PATH     = "/sse"
+
+
+def normalise_path(path):
+    """A single leading slash, no trailing slash — the form the ASGI route wants.
+
+    Behind a reverse proxy the server must answer on its *public* path: the
+    streamable-HTTP transport builds no URLs of its own, but the route only
+    matches what it was mounted at. Setting this to the public path (e.g.
+    /mcp/hls/mcp) lets nginx proxy_pass without rewriting, which is the mismatch
+    that makes a sub-path deployment 404."""
+    cleaned = (path or "").strip().strip("/")
+    return f"/{cleaned}" if cleaned else "/mcp"
+
+
+DEFAULT_HTTP_PATH = normalise_path(os.environ.get("HLS_HTTP_PATH", "/mcp"))
 
 db_module.set_db_path(DEFAULT_DB)
 
@@ -114,7 +128,12 @@ def parse_args(argv=None):
     ap.add_argument("--db",   default=DEFAULT_DB,   help="Path to hls.db (env HLS_DB)")
     ap.add_argument("--host", default=DEFAULT_HOST, help="Bind address (env HLS_HOST)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (env HLS_PORT)")
-    return ap.parse_args(argv)
+    ap.add_argument("--http-path", default=DEFAULT_HTTP_PATH,
+                    help="Path the MCP endpoint is served at; set it to the public "
+                         "path when behind a reverse proxy (env HLS_HTTP_PATH)")
+    args = ap.parse_args(argv)
+    args.http_path = normalise_path(args.http_path)
+    return args
 
 
 def main(argv=None):
@@ -128,8 +147,9 @@ def main(argv=None):
                     f"{s['text_mb']} MB text, categories: {s['categories']}")
     except Exception as e:
         logger.warning(f"Could not read DB stats: {e}")
-    logger.info(f"Starting HLS MCP server on {args.host}:{args.port}{SSE_PATH}")
-    mcp.run(transport="sse", host=args.host, port=args.port, sse_path=SSE_PATH)
+    logger.info(f"Starting HLS MCP server on {args.host}:{args.port}{args.http_path}")
+    mcp.run(transport="streamable-http", host=args.host, port=args.port,
+            streamable_http_path=args.http_path)
 
 
 if __name__ == "__main__":

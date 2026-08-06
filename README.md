@@ -2,7 +2,7 @@
 
 [HLS](https://hls.ch) (Historisches Lexikon der Schweiz | Dizionario Storico della Svizzera |
 Dictionnaire Historique de la Suisse) — MCP server using the [MCP 2.0](https://modelcontextprotocol.io)
-`MCPServer` API with SSE transport.
+`MCPServer` API with streamable HTTP transport.
 
 ## Corpus
 
@@ -29,7 +29,13 @@ HLS_SRC_CSV=/path/to/hls_articles.csv HLS_OUT_DB=/path/to/hls.db python build_db
 
 ```bash
 docker compose up -d
-# Server: http://localhost:8004/sse  (SSE transport)
+```
+
+The endpoint is `http://localhost:8004/mcp` by default, and whatever `--http-path`
+says otherwise — see [Transport](#transport). Connect a client with:
+
+```bash
+claude mcp add hls --transport http --url http://<server-ip>:8004/mcp
 ```
 
 ## Tools
@@ -45,12 +51,40 @@ docker compose up -d
 | `search_persons` | Search persons by family name or forename |
 | `get_person` | Person record by HLS person id (e.g. `per-001398`) |
 
-## MCP 2.0 transport
+## Transport
 
-Uses **SSE** (Server-Sent Events):
+<a id="transport"></a>
 
-1. `GET /sse` — opens SSE stream, receives `data: /messages/?session_id=…`
-2. `POST /messages/?session_id=…` — send JSON-RPC requests
+**Streamable HTTP** — one endpoint answering `POST` (requests), `GET` (the
+server→client stream), and `DELETE` (session teardown).
+
+This replaces the SSE transport this server used previously. SSE is deprecated, and
+its handshake hands the client an absolute `/messages/` path computed from the app's
+own mount point — a path the client cannot reach when the server sits behind a
+reverse-proxy sub-path. **Clients pointed at `/sse` must be repointed.**
+
+### Behind a reverse proxy
+
+Set `--http-path` (or `HLS_HTTP_PATH`) to the *public* path, and give nginx a
+`location` with the same string. Then nginx forwards the path unchanged:
+
+```nginx
+location /mcp/hls/mcp {
+    proxy_pass         http://127.0.0.1:8004;   # no trailing slash
+    proxy_http_version 1.1;
+    proxy_set_header   Connection '';
+    proxy_buffering    off;
+    proxy_read_timeout 3600s;
+    chunked_transfer_encoding on;
+}
+```
+
+The app's path and the nginx `location` must agree exactly or every request 404s.
+The startup line prints what is actually being served:
+
+```
+Starting HLS MCP server on 0.0.0.0:8004/mcp/hls/mcp
+```
 
 ## Environment variables
 
@@ -59,3 +93,40 @@ Uses **SSE** (Server-Sent Events):
 | `HLS_DB` | `/data/hls.db` | Path to the SQLite database |
 | `HLS_HOST` | `0.0.0.0` | Bind address |
 | `HLS_PORT` | `8004` | TCP port |
+| `HLS_HTTP_PATH` | `/mcp` | Path the MCP endpoint is served at |
+
+## Query behaviour
+
+**Limits.** Every `limit` is clamped to at most 500; a negative, zero, or non-numeric
+value falls back to that tool's own default rather than returning the whole table.
+
+**Name search.** SQL wildcards in a query are escaped, so searching for `100%` finds a
+literal "100%" rather than matching every record.
+
+**Full-text search.** `search_articles` passes the query to FTS5, so operators work —
+`Bern OR Brugg`, `Zwing*`, `NEAR(...)`. An invalid FTS5 query falls back to quoted
+phrases and then to a literal title search instead of raising.
+
+**Year ranges.** `list_articles_by_year` reads the free-text `time_span` field, so the
+overlap test runs in Python — over the candidate set *before* paging. It examines at
+most `YEAR_SCAN_CAP` (5000) rows.
+
+**Result size.** Claude.ai and Claude Desktop truncate a tool or resource result at
+roughly 150,000 characters; the 500-row ceiling keeps every tool under it.
+
+## Tests
+
+```bash
+pip install pytest
+pytest test_hls_mcp.py
+```
+
+Unit tests build their own throwaway database and need no setup. DB and server tests
+skip unless pointed at them:
+
+```bash
+HLS_DB=/data/hls.db HLS_SERVER=http://localhost:8004 pytest test_hls_mcp.py
+```
+
+Requires Python 3.10+ (`X | None` annotations); the container image is
+`python:3.12-slim`.
