@@ -124,6 +124,18 @@ most `YEAR_SCAN_CAP` (5000) rows.
 **Result size.** Claude.ai and Claude Desktop truncate a tool or resource result at
 roughly 150,000 characters; the 500-row ceiling keeps every tool under it.
 
+## Deployment
+
+This server runs on `tei.dh.unibe.ch` at
+**`https://tei.dh.unibe.ch/mcp/hls/mcp`**, alongside four sibling MCP servers:
+[Königsfelden](https://github.com/thodel/kf_mcp), [SSRQ](https://github.com/thodel/ssrq_mcp), [HBLS](https://github.com/thodel/hbls_mcp), [EOS / HGB Basel](https://github.com/thodel/eos_mcp).
+
+What they share — the nginx routing, the landing pages, and the deploy sequence —
+lives in **[tei_mcp_ops](https://github.com/thodel/tei_mcp_ops)**. Start there for
+anything that spans the fleet; in particular, the app's `--http-path` and the nginx
+`location` have to be the same string, which is the rule a sub-path deployment turns
+on.
+
 ## Tests
 
 ```bash
