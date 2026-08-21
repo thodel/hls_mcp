@@ -17,6 +17,12 @@ services:
       # rewriting. Change this together with the nginx location block; the two
       # must agree exactly or every request 404s.
       - HLS_HTTP_PATH=${HLS_HTTP_PATH:-/mcp/hls/mcp}
+      # Semantic search. The key is only needed to embed incoming queries — the
+      # article vectors are already in hls.db. GPUStack is reachable from inside
+      # the UniBE network only.
+      - GPUSTACK_BASE_URL=${GPUSTACK_BASE_URL:-https://gpustack.unibe.ch/v1}
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - HLS_EMBED_MODEL=${HLS_EMBED_MODEL:-qwen3-embedding-0.6b}
     healthcheck:
       test: ["CMD", "python", "-c",
              "import socket; socket.create_connection(('localhost', 8004), 3).close()"]

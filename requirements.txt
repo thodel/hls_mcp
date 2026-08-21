@@ -1,3 +1,8 @@
 # The server imports mcp.server.mcpserver, which exists only in mcp 2.0 — the old
 # floor of >=1.0.0 would happily install a 1.x that cannot run this code at all.
 mcp>=2.0.0,<3
+
+# Semantic search: numpy holds the vector matrix and does the similarity
+# multiply; openai is the client for the GPUStack embedding endpoint.
+numpy>=1.24
+openai>=1.30

@@ -2,6 +2,7 @@
 import argparse, json, logging, os
 from mcp.server.mcpserver import MCPServer
 import db as db_module
+import embeddings as emb_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,8 +36,12 @@ mcp = MCPServer(
         "Dictionnaire Historique de la Suisse), Switzerland's national historical encyclopedia. "
         "Articles cover biographies, families, places, institutions, and events from all periods. "
         "Articles use HLS identifiers (e.g. 001398). Persons have per-XXXXXX ids, places locXXXXXX. "
-        "Use search_articles for full-text search; search_persons for biographical lookups; "
-        "get_article for a full article record; list_articles_by_category to browse by type."
+        "Use search_semantic to find passages that ANSWER a natural-language question — "
+        "it matches meaning, works across German, French and Italian regardless of the "
+        "language of the question, and returns the passage rather than the whole article. "
+        "Use search_articles when you need an exact keyword, name or phrase. "
+        "search_persons for biographical lookups; get_article for a full article record; "
+        "list_articles_by_category to browse by type."
     ),
 )
 
@@ -53,6 +58,37 @@ def corpus_stats() -> dict:
 def search_articles(query: str, limit: int = 20) -> list[dict]:
     """Full-text search across all HLS articles (title, text, lexical class)."""
     return db_module.search_articles(query, limit)
+
+
+@mcp.tool()
+def search_semantic(query: str, limit: int = 10, category: str = "") -> list[dict]:
+    """Find passages that answer a natural-language question, by meaning.
+
+    Unlike search_articles, this does not need the query's words to appear in the
+    text: it embeds the question and returns the passages closest to it, so a
+    French question retrieves German articles and a description retrieves an
+    article whose title you did not know. Each hit is one passage, with `snippet`
+    holding its full text, `score` the cosine similarity (higher is closer), and
+    `id` the article it belongs to.
+
+    Optionally restrict to a category: bio, fam, geo, tem.
+    """
+    try:
+        vector = emb_module.embed_query(query)
+    except emb_module.EmbeddingError as exc:
+        return [{"error": str(exc)}]
+    try:
+        return db_module.search_semantic(
+            vector, limit=limit, category=(category or None))
+    except (RuntimeError, ValueError) as exc:
+        return [{"error": str(exc)}]
+
+
+@mcp.tool()
+def semantic_index_stats() -> dict:
+    """Coverage and provenance of the semantic index: how much of the corpus is
+    embedded, with which model, and by which run."""
+    return db_module.semantic_stats()
 
 
 @mcp.tool()
@@ -147,6 +183,17 @@ def main(argv=None):
                     f"{s['text_mb']} MB text, categories: {s['categories']}")
     except Exception as e:
         logger.warning(f"Could not read DB stats: {e}")
+
+    # Load the vectors now: the matrix takes a few seconds to assemble, and the
+    # first user question should not be the request that waits for it.
+    warm = db_module.warm_semantic_index(emb_module.DEFAULT_MODEL)
+    if warm.get("ready"):
+        logger.info(f"Semantic index: {warm['n_chunks']:,} chunks, "
+                    f"{warm['dims']}d, {warm['megabytes']} MB in memory "
+                    f"({warm['model']})")
+    else:
+        logger.warning(f"Semantic search unavailable: {warm.get('reason')}")
+
     logger.info(f"Starting HLS MCP server on {args.host}:{args.port}{args.http_path}")
     mcp.run(transport="streamable-http", host=args.host, port=args.port,
             streamable_http_path=args.http_path)
