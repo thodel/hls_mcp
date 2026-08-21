@@ -376,3 +376,85 @@ if __name__ == "__main__":
     print(f"\n{'═'*50}")
     print(f"{GREEN}ALL PASSED{RESET}" if ok_all else f"{RED}FAILURES{RESET}")
     sys.exit(0 if ok_all else 1)
+
+
+# ── search quality (snippet source + bm25 column weights) ────────────────────
+
+import importlib
+import sqlite3 as _sqlite3
+
+import db  # the module under test; the older tests import it lazily as db_module
+
+
+def _corpus(tmp_path):
+    """A miniature HLS with the two shapes that matter for ranking:
+    an article *about* a term, and a long article that merely mentions it.
+
+    The filler matters: with a term in every document the BM25 IDF goes
+    negative and ranking is meaningless, which is not the regime the real
+    33k-article corpus is in.
+    """
+    path = str(tmp_path / "hls_rank.db")
+    conn = _sqlite3.connect(path)
+    conn.executescript(db.SCHEMA_SQL)
+    rows = [
+        ("000001", "v", "Reformation", "<p></p>",
+         "Der religiöse Umbruch des 16. Jahrhunderts in der Eidgenossenschaft, "
+         "ausgehend von Zürich und Bern.",
+         "", "", "tem", "Themen", "", "", "", 0.0, 0.0, "", "", "", "", "", ""),
+        ("000002", "v", "Johannes Müller", "<p></p>",
+         "Pfarrer in Bern. " + "Er wirkte in der Zeit der Reformation. " * 8,
+         "", "", "bio", "Personen", "", "", "", 0.0, 0.0,
+         "1500", "1560", "Müller", "", "Johannes", ""),
+    ]
+    for i in range(60):
+        rows.append((f"9{i:05d}", "v", f"Ort {i}", "<p></p>",
+                     f"Gemeinde Nummer {i} im Aargau.", "", "", "geo", "Orte",
+                     "", "", "", 0.0, 0.0, "", "", "", "", "", ""))
+    conn.executemany("INSERT INTO articles VALUES (" + ",".join("?" * 20) + ")", rows)
+    conn.execute(
+        "INSERT INTO articles_fts(rowid,id,title,content_text,category,"
+        "lexical_class,family_name,first_name) "
+        "SELECT rowid,id,title,content_text,category,lexical_class,"
+        "family_name,first_name FROM articles")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_snippet_comes_from_the_article_body_not_its_title(tmp_path):
+    # Regression: the snippet was taken from FTS column 1 (title), so every hit
+    # reported its own title as its snippet — no evidence, no way for a RAG
+    # client to judge relevance without fetching each article in full.
+    db.set_db_path(_corpus(tmp_path))
+    hit = next(r for r in db.search_articles("Reformation", limit=5)
+               if r["id"] == "000001")
+    assert hit["snippet"] != hit["title"]
+    assert "Umbruch" in hit["snippet"]
+
+
+def test_a_title_match_outranks_a_passing_mention(tmp_path):
+    db.set_db_path(_corpus(tmp_path))
+    titles = [r["title"] for r in db.search_articles("Reformation", limit=5)]
+    assert titles[0] == "Reformation", titles
+
+
+def test_bm25_weights_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("HLS_BM25_WEIGHTS", "0,20,1,0.5,0.5,3,3")
+    importlib.reload(db)
+    assert "20.0" in db._BM25_WEIGHTS
+    monkeypatch.delenv("HLS_BM25_WEIGHTS")
+    importlib.reload(db)
+
+
+@pytest.mark.parametrize("bad", [
+    "1,2,3",                                  # wrong arity
+    "0,10,1,0.5,0.5,3,); DROP TABLE x;--",    # not numbers — never interpolated
+    "",
+])
+def test_a_malformed_weight_override_falls_back_to_the_defaults(monkeypatch, bad):
+    monkeypatch.setenv("HLS_BM25_WEIGHTS", bad)
+    importlib.reload(db)
+    assert db._BM25_WEIGHTS == db._DEFAULT_BM25_WEIGHTS
+    monkeypatch.delenv("HLS_BM25_WEIGHTS")
+    importlib.reload(db)
