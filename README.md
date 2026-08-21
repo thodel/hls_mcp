@@ -104,6 +104,7 @@ Starting HLS MCP server on 0.0.0.0:8004/mcp/hls/mcp
 | `HLS_HOST` | `0.0.0.0` | Bind address |
 | `HLS_PORT` | `8004` | TCP port |
 | `HLS_HTTP_PATH` | `/mcp` | Path the MCP endpoint is served at |
+| `HLS_BM25_WEIGHTS` | `0,10,1,0.5,0.5,3,3` | bm25 column weights for `search_articles` — see [Ranking](#ranking) |
 
 ## Query behaviour
 
@@ -116,6 +117,35 @@ literal "100%" rather than matching every record.
 **Full-text search.** `search_articles` passes the query to FTS5, so operators work —
 `Bern OR Brugg`, `Zwing*`, `NEAR(...)`. An invalid FTS5 query falls back to quoted
 phrases and then to a literal title search instead of raising.
+
+**Snippets.** Each hit's `snippet` is drawn from the article body, with the matched
+terms wrapped in `<b>`. Before this was fixed the snippet was taken from the title
+column, so every hit's snippet was simply its own title — a RAG client had no way to
+judge relevance without fetching each article in full.
+
+### Ranking
+
+`search_articles` orders by `bm25()` with per-column weights rather than the
+unweighted default, because a title match is the strongest signal that an article is
+*about* the query, while an unweighted score lets any long article that mentions the
+term often outrank it.
+
+| Column | Weight | Why |
+|---|---|---|
+| `id` | 0 | unindexed |
+| `title` | 10 | the headword is what the article is about |
+| `content_text` | 1 | baseline |
+| `category`, `lexical_class` | 0.5 | classification, not content |
+| `family_name`, `first_name` | 3 | a person search should reach the person |
+
+Override with `HLS_BM25_WEIGHTS` (seven comma-separated numbers, in the column order
+above). A malformed value is ignored in favour of the defaults, so it can never reach
+the SQL.
+
+> These weights are reasoned, not yet tuned against the full corpus. Searching
+> `Königsfelden` on the live corpus returned `Franz Ludwig Haller von Königsfelden`
+> and several passing mentions ahead of the place itself; re-check that query after
+> deploying and adjust the title weight if it still does.
 
 **Year ranges.** `list_articles_by_year` reads the free-text `time_span` field, so the
 overlap test runs in Python — over the candidate set *before* paging. It examines at

@@ -1,6 +1,7 @@
 """
 db.py — SQLite query helpers for HLS MCP server.
 """
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -141,14 +142,49 @@ def stats() -> dict[str, Any]:
 
 # ── Article queries ───────────────────────────────────────────────────────────
 
-_FTS_SQL = """
+# Column order in articles_fts: 0 id (UNINDEXED), 1 title, 2 content_text,
+# 3 category, 4 lexical_class, 5 family_name, 6 first_name.
+#
+# The snippet must come from column 2 (content_text). Taking it from column 1
+# returned the article's own title as its "snippet" for every hit, which told a
+# caller nothing it did not already have — and left RAG clients no choice but to
+# fetch every hit in full before they could judge relevance.
+#
+# bm25 weights, rather than the unweighted default: a title match is the
+# strongest possible signal that an article is *about* the query, but with equal
+# weights it loses to any long article that happens to mention the term often.
+# Searching "Königsfelden" ranked "Franz Ludwig Haller von Königsfelden" above
+# the place itself. Negative bm25 scores sort ascending — lowest is best.
+# Tunable without a rebuild: HLS_BM25_WEIGHTS="0.0,10.0,1.0,0.5,0.5,3.0,3.0".
+# The defaults have been reasoned about but not yet tuned against the full
+# 33,506-article corpus — see README §Ranking.
+_DEFAULT_BM25_WEIGHTS = "0.0, 10.0, 1.0, 0.5, 0.5, 3.0, 3.0"
+
+
+def _bm25_weights() -> str:
+    """Validated bm25 column weights: seven finite numbers, one per column."""
+    raw = os.environ.get("HLS_BM25_WEIGHTS", _DEFAULT_BM25_WEIGHTS)
+    try:
+        values = [float(part) for part in raw.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 7 or any(v != v or v in (float("inf"), float("-inf")) for v in values):
+        # A malformed override must not be interpolated into SQL, and must not
+        # take the server down — fall back to the vetted defaults.
+        return _DEFAULT_BM25_WEIGHTS
+    return ", ".join(repr(v) for v in values)
+
+
+_BM25_WEIGHTS = _bm25_weights()
+
+_FTS_SQL = f"""
     SELECT a.id, a.title, a.category, a.lexical_class,
-           snippet(articles_fts, 1, '<b>', '</b>', '…', 32) AS snippet,
+           snippet(articles_fts, 2, '<b>', '</b>', '…', 32) AS snippet,
            a.lat, a.lon, a.time_span, a.family_name, a.first_name
     FROM articles_fts f
     JOIN articles a ON a.rowid = f.rowid
     WHERE articles_fts MATCH ?
-    ORDER BY rank
+    ORDER BY bm25(articles_fts, {_BM25_WEIGHTS})
     LIMIT ?
 """
 
