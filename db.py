@@ -57,6 +57,44 @@ CREATE INDEX IF NOT EXISTS ix_articles_lexical  ON articles(lexical_class);
 CREATE INDEX IF NOT EXISTS ix_articles_family   ON articles(family_name);
 CREATE INDEX IF NOT EXISTS ix_persons_article   ON persons(article_id);
 CREATE INDEX IF NOT EXISTS ix_persons_family    ON persons(family_name);
+
+-- ── Semantic search (embed_db.py) ────────────────────────────────────────────
+-- Articles are windowed into passages and each passage is embedded, so a query
+-- can match the paragraph that answers it rather than a whole biography. The
+-- vector is stored L2-normalised, which makes cosine similarity a dot product.
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id    TEXT    PRIMARY KEY,   -- "<article_id>#<chunk_index>"
+    article_id  TEXT    NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    char_start  INTEGER NOT NULL,
+    char_end    INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    UNIQUE (article_id, chunk_index)
+);
+CREATE TABLE IF NOT EXISTS embeddings (
+    chunk_id TEXT    PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    model    TEXT    NOT NULL,
+    dims     INTEGER NOT NULL,
+    vector   BLOB    NOT NULL          -- float32, little-endian, L2-normalised
+);
+-- One row per pipeline run: which model produced which vectors, and when.
+-- Provenance is a project requirement, not bookkeeping — an answer's evidence
+-- has to be traceable to the process that indexed it.
+CREATE TABLE IF NOT EXISTS embedding_runs (
+    run_id      TEXT PRIMARY KEY,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    model       TEXT NOT NULL,
+    dims        INTEGER,
+    base_url    TEXT,
+    chunk_chars INTEGER,
+    chunk_overlap INTEGER,
+    n_articles  INTEGER,
+    n_chunks    INTEGER,
+    notes       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_chunks_article ON chunks(article_id);
+CREATE INDEX IF NOT EXISTS ix_embeddings_model ON embeddings(model);
 """
 
 ARTICLE_BRIEF = ("id, title, category, lexical_class, time_span, "
@@ -335,3 +373,173 @@ def get_persons_by_article(article_id: str, limit: int = MAX_LIMIT) -> list[dict
             "SELECT * FROM persons WHERE article_id=? LIMIT ?",
             (article_id, clamp(limit, MAX_LIMIT))).fetchall()
         return _rows(rows)
+
+
+# ── Semantic search ───────────────────────────────────────────────────────────
+#
+# Vectors are stored L2-normalised, so cosine similarity is a dot product and
+# the whole search is one matrix multiply. At ~100k chunks × 1024 dimensions the
+# matrix is a few hundred megabytes and the multiply takes milliseconds, so
+# there is no approximate index here: results are exact, and there is no recall
+# parameter to get wrong.
+#
+# The matrix is built once per (database, model) on first use and cached. Build
+# it eagerly at startup with `warm_semantic_index()` so the first user query is
+# not the one that pays for it.
+
+_VECTOR_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def _load_matrix(model: str):
+    """(chunk_ids, matrix) for a model, loaded once and cached."""
+    key = (_DB_PATH, model)
+    cached = _VECTOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(
+            "numpy is required for semantic search — pip install numpy") from exc
+
+    with conn() as c:
+        rows = c.execute(
+            "SELECT chunk_id, dims, vector FROM embeddings WHERE model = ? "
+            "ORDER BY chunk_id", (model,)).fetchall()
+    if not rows:
+        raise RuntimeError(
+            f"no embeddings for model {model!r} in {_DB_PATH}. "
+            "Run embed_db.py to build the semantic index.")
+
+    dims = rows[0][1]
+    chunk_ids = [r[0] for r in rows]
+    # One contiguous buffer rather than a list of arrays: this is the difference
+    # between a matrix multiply and a hundred thousand small ones.
+    buffer = b"".join(r[2] for r in rows)
+    matrix = np.frombuffer(buffer, dtype="<f4").reshape(len(rows), dims)
+    _VECTOR_CACHE[key] = (chunk_ids, matrix)
+    return chunk_ids, matrix
+
+
+def warm_semantic_index(model: str) -> dict[str, Any]:
+    """Load the vectors now and report what was loaded (or why it could not be)."""
+    try:
+        chunk_ids, matrix = _load_matrix(model)
+    except RuntimeError as exc:
+        return {"ready": False, "model": model, "reason": str(exc)}
+    return {"ready": True, "model": model,
+            "n_chunks": len(chunk_ids), "dims": int(matrix.shape[1]),
+            "megabytes": round(matrix.nbytes / 1_048_576, 1)}
+
+
+def semantic_stats(model: str | None = None) -> dict[str, Any]:
+    """Coverage of the semantic index, and the runs that produced it."""
+    with conn() as c:
+        if not c.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                         "AND name='embeddings'").fetchone():
+            return {"indexed": False,
+                    "reason": "no embeddings table; run embed_db.py"}
+        by_model = c.execute(
+            "SELECT model, COUNT(*), MAX(dims) FROM embeddings GROUP BY model"
+        ).fetchall()
+        n_chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        n_articles_total = c.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        n_articles_chunked = c.execute(
+            "SELECT COUNT(DISTINCT article_id) FROM chunks").fetchone()[0]
+        runs = c.execute(
+            "SELECT run_id, started_at, finished_at, model, dims, n_chunks, notes "
+            "FROM embedding_runs ORDER BY started_at DESC LIMIT 5").fetchall()
+    return {
+        "indexed": bool(by_model),
+        "n_chunks": n_chunks,
+        "n_articles_indexed": n_articles_chunked,
+        "n_articles_total": n_articles_total,
+        "coverage": round(n_articles_chunked / n_articles_total, 4)
+        if n_articles_total else 0.0,
+        "models": [{"model": m, "n_vectors": n, "dims": d} for m, n, d in by_model],
+        "recent_runs": [
+            {"run_id": r[0], "started_at": r[1], "finished_at": r[2],
+             "model": r[3], "dims": r[4], "n_chunks": r[5], "notes": r[6]}
+            for r in runs],
+    }
+
+
+_SEMANTIC_SQL = """
+    SELECT c.chunk_id, c.article_id, c.chunk_index, c.char_start, c.char_end,
+           c.text, a.title, a.category, a.lexical_class, a.time_span,
+           a.family_name, a.first_name, a.lat, a.lon
+    FROM chunks c JOIN articles a ON a.id = c.article_id
+    WHERE c.chunk_id IN ({placeholders})
+"""
+
+
+def search_semantic(query_vector, limit: int = 20, model: str | None = None,
+                    category: str | None = None,
+                    per_article: int = 2) -> list[dict]:
+    """Passages closest in meaning to an already-embedded query.
+
+    ``per_article`` caps how many passages one article may contribute, so a
+    single long biography cannot fill the whole result set and crowd out the
+    other articles that answer the question.
+    """
+    import numpy as np
+
+    limit = clamp(limit, 20)
+    model = model or os.environ.get("HLS_EMBED_MODEL", "qwen3-embedding-0.6b")
+    chunk_ids, matrix = _load_matrix(model)
+
+    query = np.asarray(query_vector, dtype="float32")
+    if query.shape[0] != matrix.shape[1]:
+        raise ValueError(
+            f"query has {query.shape[0]} dimensions, index has {matrix.shape[1]}")
+    norm = float(np.linalg.norm(query)) or 1.0
+    scores = matrix @ (query / norm)
+
+    # Take a generous slice before filtering: the category filter and the
+    # per-article cap both discard candidates, so topping up here avoids a
+    # second pass over the matrix.
+    fetch = min(len(chunk_ids), max(limit * 8, limit + 50))
+    candidates = np.argpartition(-scores, fetch - 1)[:fetch]
+    candidates = candidates[np.argsort(-scores[candidates])]
+
+    picked = [(chunk_ids[i], float(scores[i])) for i in candidates]
+    by_id = {}
+    with conn() as c:
+        for start in range(0, len(picked), 400):
+            window = picked[start:start + 400]
+            sql = _SEMANTIC_SQL.format(placeholders=",".join("?" * len(window)))
+            for row in c.execute(sql, [cid for cid, _ in window]).fetchall():
+                by_id[row[0]] = row
+
+    out: list[dict] = []
+    seen_per_article: dict[str, int] = {}
+    for chunk_id, score in picked:
+        row = by_id.get(chunk_id)
+        if row is None:
+            continue                       # vector outlived its chunk
+        if category and row[7] != category:
+            continue
+        if seen_per_article.get(row[1], 0) >= per_article:
+            continue
+        seen_per_article[row[1]] = seen_per_article.get(row[1], 0) + 1
+        out.append({
+            "id": row[1],
+            "chunk_id": chunk_id,
+            "title": row[6],
+            "category": row[7],
+            "lexical_class": row[8],
+            "snippet": row[5],
+            "score": round(score, 4),
+            "chunk_index": row[2],
+            "char_start": row[3],
+            "char_end": row[4],
+            "time_span": row[9],
+            "family_name": row[10],
+            "first_name": row[11],
+            "lat": row[12],
+            "lon": row[13],
+        })
+        if len(out) >= limit:
+            break
+    return out

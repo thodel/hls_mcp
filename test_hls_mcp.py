@@ -458,3 +458,174 @@ def test_a_malformed_weight_override_falls_back_to_the_defaults(monkeypatch, bad
     assert db._BM25_WEIGHTS == db._DEFAULT_BM25_WEIGHTS
     monkeypatch.delenv("HLS_BM25_WEIGHTS")
     importlib.reload(db)
+
+
+# ── Semantic search ──────────────────────────────────────────────────────────
+#
+# No test here calls GPUStack. Vectors are synthesised, so the suite runs off
+# the UniBE network and in CI; only the pipeline's own smoke run needs the VPN.
+
+import embeddings as emb
+import struct as _struct
+
+
+def test_chunking_keeps_offsets_that_point_back_into_the_article():
+    text = "\n\n".join(f"Absatz {i}. " + "Wort " * 60 for i in range(6))
+    chunks = emb.chunk_article(text, size=400, overlap=60)
+    assert len(chunks) > 1
+    for start, end, piece in chunks:
+        # An offset that does not locate the passage in its article makes the
+        # citation untraceable, which is the whole point of the corpus.
+        assert text[start:end].strip() == piece
+
+
+def test_a_short_article_is_one_chunk():
+    assert emb.chunk_article("Kurzer Artikel.") == [(0, 15, "Kurzer Artikel.")]
+
+
+def test_empty_text_yields_no_chunks():
+    assert emb.chunk_article("   ") == []
+
+
+def test_chunking_terminates_when_overlap_exceeds_the_window():
+    assert emb.chunk_article("x" * 500, size=100, overlap=200)
+
+
+def test_the_byline_is_stripped_before_embedding():
+    # Every HLS body opens with the same byline shape; left in, it is a large
+    # part of a short article's only chunk and says nothing about the subject.
+    cleaned = emb.clean_article_text("Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde.")
+    assert cleaned == "Politische Gemeinde."
+
+
+def test_a_body_without_a_byline_is_untouched():
+    assert emb.clean_article_text("Politische Gemeinde.") == "Politische Gemeinde."
+
+
+def test_vectors_round_trip_and_come_back_normalised():
+    packed = emb.pack([3.0, 4.0])
+    assert len(packed) == 8
+    out = emb.unpack(packed)
+    assert abs(out[0] - 0.6) < 1e-6 and abs(out[1] - 0.8) < 1e-6
+
+
+def test_a_zero_vector_does_not_divide_by_zero():
+    assert emb.unpack(emb.pack([0.0, 0.0])) == [0.0, 0.0]
+
+
+def test_the_query_prefix_is_applied(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        class embeddings:
+            @staticmethod
+            def create(model, input):
+                seen["input"] = input
+                return type("R", (), {"data": [type("D", (), {"embedding": [1.0, 0.0]})()]})()
+
+    emb.embed_query("Wer war Agnes?", client=FakeClient())
+    # Qwen3-Embedding is instruction-aware; dropping this costs retrieval quality.
+    assert seen["input"][0].startswith("Instruct:")
+    assert seen["input"][0].endswith("Wer war Agnes?")
+
+
+def _semantic_corpus(tmp_path):
+    """A corpus with hand-placed vectors, so expected ranking is arithmetic."""
+    path = str(tmp_path / "hls_sem.db")
+    conn = _sqlite3.connect(path)
+    conn.executescript(db.SCHEMA_SQL)
+    articles = [
+        ("000001", "Königsfelden", "geo", [1.0, 0.0, 0.0]),
+        ("000002", "Habsburg", "tem", [0.8, 0.6, 0.0]),
+        ("000003", "Uzwil", "geo", [0.0, 1.0, 0.0]),
+    ]
+    for aid, title, cat, _ in articles:
+        conn.execute("INSERT INTO articles (id, title, category, content_text) "
+                     "VALUES (?,?,?,?)", (aid, title, cat, f"Text über {title}."))
+    for aid, title, cat, vec in articles:
+        for index in (0, 1):     # two passages each, to exercise per_article
+            cid = f"{aid}#{index}"
+            conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                         (cid, aid, index, 0, 10, f"{title} Passage {index}"))
+            conn.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
+                         (cid, "test-model", 3, emb.pack(vec)))
+    conn.commit()
+    conn.close()
+    db._VECTOR_CACHE.clear()
+    db.set_db_path(path)
+    return path
+
+
+def test_semantic_search_ranks_by_cosine_similarity(tmp_path):
+    _semantic_corpus(tmp_path)
+    # One passage per article, so this checks the ordering and nothing else.
+    hits = db.search_semantic([1.0, 0.0, 0.0], limit=3, model="test-model",
+                              per_article=1)
+    assert [h["title"] for h in hits] == ["Königsfelden", "Habsburg", "Uzwil"]
+    assert hits[0]["score"] > hits[1]["score"] > hits[2]["score"]
+
+
+def test_one_article_cannot_fill_the_result_set(tmp_path):
+    # A long biography has many passages; without a cap it crowds out every
+    # other article that answers the question.
+    _semantic_corpus(tmp_path)
+    hits = db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
+                              per_article=1)
+    assert len({h["id"] for h in hits}) == len(hits)
+
+
+def test_the_per_article_cap_can_be_raised(tmp_path):
+    _semantic_corpus(tmp_path)
+    hits = db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
+                              per_article=2)
+    assert sum(1 for h in hits if h["id"] == "000001") == 2
+
+
+def test_results_can_be_restricted_to_a_category(tmp_path):
+    _semantic_corpus(tmp_path)
+    hits = db.search_semantic([1.0, 0.0, 0.0], limit=5, model="test-model",
+                              category="geo")
+    assert {h["category"] for h in hits} == {"geo"}
+
+
+def test_hits_carry_the_offsets_needed_to_cite_them(tmp_path):
+    _semantic_corpus(tmp_path)
+    hit = db.search_semantic([1.0, 0.0, 0.0], limit=1, model="test-model")[0]
+    for field in ("id", "chunk_id", "chunk_index", "char_start", "char_end", "score"):
+        assert field in hit, field
+
+
+def test_a_dimension_mismatch_is_reported_not_silently_wrong(tmp_path):
+    _semantic_corpus(tmp_path)
+    with pytest.raises(ValueError, match="dimensions"):
+        db.search_semantic([1.0, 0.0], limit=1, model="test-model")
+
+
+def test_an_unindexed_model_says_how_to_fix_it(tmp_path):
+    _semantic_corpus(tmp_path)
+    with pytest.raises(RuntimeError, match="embed_db"):
+        db.search_semantic([1.0, 0.0, 0.0], limit=1, model="never-run")
+
+
+def test_warm_reports_size_rather_than_raising(tmp_path):
+    _semantic_corpus(tmp_path)
+    warm = db.warm_semantic_index("test-model")
+    assert warm["ready"] and warm["n_chunks"] == 6 and warm["dims"] == 3
+    assert db.warm_semantic_index("never-run")["ready"] is False
+
+
+def test_semantic_stats_report_coverage(tmp_path):
+    _semantic_corpus(tmp_path)
+    stats = db.semantic_stats()
+    assert stats["indexed"] and stats["n_chunks"] == 6
+    assert stats["coverage"] == 1.0
+    assert stats["models"][0]["model"] == "test-model"
+
+
+def test_stats_on_a_corpus_with_no_index_explain_themselves(tmp_path):
+    path = str(tmp_path / "bare.db")
+    conn = _sqlite3.connect(path)
+    conn.executescript("CREATE TABLE articles (id TEXT PRIMARY KEY, title TEXT);")
+    conn.commit(); conn.close()
+    db.set_db_path(path)
+    assert db.semantic_stats()["indexed"] is False

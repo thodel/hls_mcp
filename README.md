@@ -53,6 +53,8 @@ without a `type` is read as a stdio server and skipped.
 | Tool | Description |
 |------|-------------|
 | `corpus_stats` | Corpus summary: article/person counts, text size, categories |
+| `search_semantic` | **Meaning-based** passage search — answers questions across languages |
+| `semantic_index_stats` | Coverage and provenance of the semantic index |
 | `search_articles` | FTS5 full-text search across title, text, lexical class |
 | `get_article` | Full article record by HLS id (e.g. `001398`) |
 | `list_articles_by_category` | Browse articles by type: bio, fam, geo, tem |
@@ -60,6 +62,58 @@ without a `type` is read as a stdio server and skipped.
 | `list_persons` | Paginated person authority list |
 | `search_persons` | Search persons by family name or forename |
 | `get_person` | Person record by HLS person id (e.g. `per-001398`) |
+
+## Semantic search
+
+`search_articles` finds articles containing the words you typed. `search_semantic`
+finds passages that *mean* what you asked — which is a different, and for this corpus
+a more useful, thing:
+
+- **It works across languages.** HLS text is overwhelmingly German. Asking
+  *"Que sait-on du Pacte fédéral de 1291 ?"* through `search_articles` returns noise,
+  because the French words are not in the German text. Through `search_semantic` it
+  returns *Bundesvertrag* and *Schweizerische Eidgenossenschaft*.
+- **It does not need the right word.** Asking about the monastery at Königsfelden by
+  keyword returned *Franz Ludwig Haller von Königsfelden* and passing mentions; by
+  meaning, the *Königsfelden* article ranks first at 0.77.
+- **It returns passages, not articles.** A hit is one ~1000-character window with its
+  offsets into the article, so an answer can quote and cite the paragraph rather than
+  a 20,000-character biography.
+
+Use `search_articles` when the exact string matters (a name, a spelling, a phrase) and
+`search_semantic` when the question matters.
+
+### Building the index
+
+```bash
+GPUSTACK_API_KEY=... python embed_db.py            # whole corpus
+GPUSTACK_API_KEY=... python embed_db.py --limit 500 # trial run on a sample
+GPUSTACK_API_KEY=... python embed_db.py --recompute # after changing the model
+```
+
+Articles are windowed into ~1000-character passages (150 overlap), each prefixed with
+its article title so a passage lifted from mid-article still carries its subject, and
+embedded with `qwen3-embedding-0.6b` on GPUStack (1024 dimensions). Vectors are stored
+L2-normalised as float32 BLOBs.
+
+Runs are **resumable** — chunks already embedded with the same model are skipped, and
+each batch is committed — so an interrupted run continues rather than restarting.
+Every run is recorded in `embedding_runs` with its model, dimensions and window
+settings.
+
+Measured on the full corpus (2026-08-21): **57,538 passages over all 33,506 articles,
+183 seconds** at ~320 passages/s. The database grows from 202 MB to 511 MB; the server
+holds 225 MB of vectors resident and loads them at startup, so no user query pays for
+the load. A search is one matrix multiply — exact, no approximate index, nothing to
+tune — and takes ~100 ms including the round trip to embed the query.
+
+### Query-time requirements
+
+The server embeds the incoming query, so it needs `GPUSTACK_API_KEY` at runtime even
+though the article vectors are already in the database. GPUStack is reachable only
+from inside the UniBE network; from outside it returns **403 before checking the key**,
+so a 403 means the wrong network, not a bad credential. Without a key the other tools
+work normally and `search_semantic` returns an explanatory error.
 
 ## Transport
 
@@ -105,6 +159,12 @@ Starting HLS MCP server on 0.0.0.0:8004/mcp/hls/mcp
 | `HLS_PORT` | `8004` | TCP port |
 | `HLS_HTTP_PATH` | `/mcp` | Path the MCP endpoint is served at |
 | `HLS_BM25_WEIGHTS` | `0,10,1,0.5,0.5,3,3` | bm25 column weights for `search_articles` — see [Ranking](#ranking) |
+| `GPUSTACK_BASE_URL` | `https://gpustack.unibe.ch/v1` | Embedding endpoint |
+| `GPUSTACK_API_KEY` | — | Required to embed queries for `search_semantic` |
+| `HLS_EMBED_MODEL` | `qwen3-embedding-0.6b` | Embedding model (1024 dimensions) |
+| `HLS_EMBED_BATCH` | `64` | Passages per embedding request |
+| `HLS_CHUNK_CHARS` / `HLS_CHUNK_OVERLAP` | `1000` / `150` | Passage windowing |
+| `HLS_EMBED_QUERY_PREFIX` | *(Qwen instruction)* | Instruction prefix for query embedding |
 
 ## Query behaviour
 

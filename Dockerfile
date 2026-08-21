@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-COPY build_db.py db.py server.py requirements.txt ./
+COPY build_db.py db.py embed_db.py embeddings.py server.py requirements.txt ./
 
 # Install deps, then delete build tools
 RUN pip install --no-cache-dir -r requirements.txt
