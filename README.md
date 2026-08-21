@@ -165,6 +165,7 @@ Starting HLS MCP server on 0.0.0.0:8004/mcp/hls/mcp
 | `HLS_EMBED_BATCH` | `64` | Passages per embedding request |
 | `HLS_CHUNK_CHARS` / `HLS_CHUNK_OVERLAP` | `1000` / `150` | Passage windowing |
 | `HLS_EMBED_QUERY_PREFIX` | *(Qwen instruction)* | Instruction prefix for query embedding |
+| `HLS_DATA_DIR` | `/home/dh/hls_data` | Host directory mounted at `/data` — must be writable by the user running compose, since `embed_db.py` writes the index into the same database |
 
 ## Query behaviour
 

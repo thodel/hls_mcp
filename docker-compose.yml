@@ -7,7 +7,10 @@ services:
     ports:
       - "8004:8004"
     volumes:
-      - /home/dh/hls_data:/data
+      # Where hls.db and its vectors live on the host. Set HLS_DATA_DIR in the
+      # host .env; it must be writable by the user running compose, because
+      # embed_db.py writes the semantic index into the same database.
+      - ${HLS_DATA_DIR:-/home/dh/hls_data}:/data
       - /home/dh/hls/HLS:/src:ro
     environment:
       - PYTHONUNBUFFERED=1
