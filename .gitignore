@@ -2,3 +2,14 @@ hls.db
 *.db
 *.db-shm
 *.db-wal
+*.bak-*
+
+# Secrets. The server needs GPUSTACK_API_KEY at runtime to embed queries, so a
+# .env sits next to docker-compose.yml on the host — it must never be committed.
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
