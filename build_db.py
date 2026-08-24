@@ -5,6 +5,7 @@ Run once to populate /data/hls.db inside the container.
 """
 import csv, os, sys, sqlite3
 
+from article_metadata import split_author_byline
 import db as db_module
 
 SRC_CSV = os.environ.get("HLS_SRC_CSV", "/src/hls_articles.csv")
@@ -41,6 +42,7 @@ def build_db():
         bdate = row.get("bio.birth_date", "") or ""
         ddate = row.get("bio.death_date", "") or ""
         gender= row.get("bio.gender", "") or ""
+        author, _ = split_author_byline(row.get("content_text", ""))
 
         rows_buf.append((
             aid, row.get("version",""), row.get("title",""),
@@ -50,14 +52,17 @@ def build_db():
             row.get("place_class",""), row.get("origin_place_class",""),
             float(row["geo.lat"])   if row.get("geo.lat")   else None,
             float(row["geo.lon"])   if row.get("geo.lon")   else None,
-            bdate, ddate, fam, addl, first, gender,
+            bdate, ddate, fam, addl, first, gender, author,
         ))
 
         if cat == "bio" and fam:
             persons_buf.append((f"per-{aid}", aid, fam, first, addl, bdate, ddate, gender, cat))
 
         if len(rows_buf) >= BATCH:
-            conn.executemany("INSERT OR IGNORE INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows_buf)
+            conn.executemany(
+                "INSERT OR IGNORE INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows_buf,
+            )
             if persons_buf:
                 conn.executemany("INSERT OR IGNORE INTO persons VALUES (?,?,?,?,?,?,?,?,?)", persons_buf)
             total += len(rows_buf)
@@ -65,7 +70,10 @@ def build_db():
             rows_buf.clear(); persons_buf.clear()
 
     if rows_buf:
-        conn.executemany("INSERT OR IGNORE INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows_buf)
+        conn.executemany(
+            "INSERT OR IGNORE INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows_buf,
+        )
         total += len(rows_buf)
     if persons_buf:
         conn.executemany("INSERT OR IGNORE INTO persons VALUES (?,?,?,?,?,?,?,?,?)", persons_buf)

@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS articles (
     family_name   TEXT,
     additional    TEXT,
     first_name    TEXT,
-    gender        TEXT
+    gender        TEXT,
+    author        TEXT
 );
 CREATE TABLE IF NOT EXISTS persons (
     id          TEXT PRIMARY KEY,
@@ -98,7 +99,7 @@ CREATE INDEX IF NOT EXISTS ix_embeddings_model ON embeddings(model);
 """
 
 ARTICLE_BRIEF = ("id, title, category, lexical_class, time_span, "
-                 "lat, lon, family_name, first_name")
+                 "lat, lon, family_name, first_name, author")
 
 
 def set_db_path(path: str):
@@ -218,7 +219,7 @@ _BM25_WEIGHTS = _bm25_weights()
 _FTS_SQL = f"""
     SELECT a.id, a.title, a.category, a.lexical_class,
            snippet(articles_fts, 2, '<b>', '</b>', '…', 32) AS snippet,
-           a.lat, a.lon, a.time_span, a.family_name, a.first_name
+           a.lat, a.lon, a.time_span, a.family_name, a.first_name, a.author
     FROM articles_fts f
     JOIN articles a ON a.rowid = f.rowid
     WHERE articles_fts MATCH ?
@@ -229,7 +230,7 @@ _FTS_SQL = f"""
 _LIKE_SQL = """
     SELECT id, title, category, lexical_class,
            SUBSTR(content_text, 1, 120) AS snippet,
-           lat, lon, time_span, family_name, first_name
+           lat, lon, time_span, family_name, first_name, author
     FROM articles
     WHERE title LIKE ? ESCAPE '\\'
     LIMIT ?
@@ -468,7 +469,7 @@ def semantic_stats(model: str | None = None) -> dict[str, Any]:
 _SEMANTIC_SQL = """
     SELECT c.chunk_id, c.article_id, c.chunk_index, c.char_start, c.char_end,
            c.text, a.title, a.category, a.lexical_class, a.time_span,
-           a.family_name, a.first_name, a.lat, a.lon
+           a.family_name, a.first_name, a.lat, a.lon, a.author
     FROM chunks c JOIN articles a ON a.id = c.article_id
     WHERE c.chunk_id IN ({placeholders})
 """
@@ -539,6 +540,7 @@ def search_semantic(query_vector, limit: int = 20, model: str | None = None,
             "first_name": row[11],
             "lat": row[12],
             "lon": row[13],
+            "author": row[14],
         })
         if len(out) >= limit:
             break

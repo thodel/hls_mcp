@@ -16,10 +16,13 @@ Unit tests build their own throwaway database, so they need no setup. Tests
 needing the real DB or a live server skip when it isn't configured.
 """
 import argparse, json, os, sqlite3, sys, tempfile
+import csv
 import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+from article_metadata import split_author_byline  # noqa: E402
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -71,16 +74,16 @@ def base_url():
 
 # id, version, title, content_html, content_text, time_span, orig_time, category,
 # lexical_class, orig_lexical, place_class, orig_place, lat, lon, birth_date,
-# death_date, family_name, additional, first_name, gender
+# death_date, family_name, additional, first_name, gender, author
 ARTICLES = [
     ("001398", "1", "Zwingli, Ulrich", "", "Reformator in Zürich", "1484-1531", "",
-     "bio", "Reformator", "", "", "", None, None, "1484", "1531", "Zwingli", "", "Ulrich", "m"),
+     "bio", "Reformator", "", "", "", None, None, "1484", "1531", "Zwingli", "", "Ulrich", "m", "Peter Blickle"),
     ("001399", "1", "Brugg", "", "Stadt im Kanton Aargau", "1284-", "",
-     "geo", "Stadt", "", "", "", 47.48, 8.21, "", "", "", "", "", ""),
+     "geo", "Stadt", "", "", "", 47.48, 8.21, "", "", "", "", "", "", None),
     ("001400", "1", "Anna 100% Sicher", "", "Testartikel mit Prozentzeichen", "1600-1650", "",
-     "bio", "Test", "", "", "", None, None, "1600", "1650", "Sicher", "", "Anna", "f"),
+     "bio", "Test", "", "", "", None, None, "1600", "1650", "Sicher", "", "Anna", "f", None),
     ("001401", "1", "Hans_Meier", "", "Testartikel mit Unterstrich", "1700-1750", "",
-     "bio", "Test", "", "", "", None, None, "1700", "1750", "Meier", "", "Hans", "m"),
+     "bio", "Test", "", "", "", None, None, "1700", "1750", "Meier", "", "Hans", "m", None),
 ]
 
 # The literal '%' and '_' live in the person names on purpose: they are what the
@@ -96,7 +99,7 @@ def make_fixture_db(path):
     import db as db_module
     con = sqlite3.connect(path)
     con.executescript(db_module.SCHEMA_SQL)
-    con.executemany(f"INSERT INTO articles VALUES ({','.join('?' * 20)})", ARTICLES)
+    con.executemany(f"INSERT INTO articles VALUES ({','.join('?' * 21)})", ARTICLES)
     con.executemany(f"INSERT INTO persons VALUES ({','.join('?' * 9)})", PERSONS)
     con.execute(
         "INSERT INTO articles_fts(rowid,id,title,content_text,category,"
@@ -168,6 +171,51 @@ def test_fulltext_survives_hostile_queries():
                 tr.check(False, f"search_articles({q!r}) raised {type(e).__name__}: {e}")
         tr.check("error" in db.search_articles("")[0], "an empty query is reported as an error")
     tr.assert_ok()
+
+
+def test_hls_byline_is_metadata_not_embedding_text():
+    author, body = split_author_byline(
+        "Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde."
+    )
+
+    assert author == "Beat Bühler"
+    assert body == "Politische Gemeinde."
+    assert split_author_byline("Politische Gemeinde.") == (
+        None, "Politische Gemeinde."
+    )
+
+
+def test_author_is_returned_with_keyword_and_detail_results(tmp_path):
+    db = make_fixture_db(str(tmp_path / "hls.db"))
+
+    assert db.search_articles("Reformator")[0]["author"] == "Peter Blickle"
+    assert db.get_article("001398")["author"] == "Peter Blickle"
+
+
+def test_csv_import_preserves_byline_as_author_metadata(tmp_path, monkeypatch):
+    import build_db as builder
+
+    source = tmp_path / "hls.csv"
+    with source.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["id", "title", "content_text"])
+        writer.writeheader()
+        writer.writerow({
+            "id": "001398",
+            "title": "Zwingli, Ulrich",
+            "content_text": "Autorin/Autor:\nPeter Blickle\nReformator in Zürich",
+        })
+    database = tmp_path / "imported.db"
+    monkeypatch.setattr(builder, "SRC_CSV", str(source))
+    monkeypatch.setattr(builder, "OUT_DB", str(database))
+
+    builder.build_db()
+
+    with sqlite3.connect(database) as connection:
+        author, text = connection.execute(
+            "SELECT author, content_text FROM articles WHERE id = '001398'"
+        ).fetchone()
+    assert author == "Peter Blickle"
+    assert "Autorin/Autor:" in text
 
 
 def test_year_filter_applies_before_paging():
@@ -401,17 +449,17 @@ def _corpus(tmp_path):
         ("000001", "v", "Reformation", "<p></p>",
          "Der religiöse Umbruch des 16. Jahrhunderts in der Eidgenossenschaft, "
          "ausgehend von Zürich und Bern.",
-         "", "", "tem", "Themen", "", "", "", 0.0, 0.0, "", "", "", "", "", ""),
+         "", "", "tem", "Themen", "", "", "", 0.0, 0.0, "", "", "", "", "", "", "Historikerin A"),
         ("000002", "v", "Johannes Müller", "<p></p>",
          "Pfarrer in Bern. " + "Er wirkte in der Zeit der Reformation. " * 8,
          "", "", "bio", "Personen", "", "", "", 0.0, 0.0,
-         "1500", "1560", "Müller", "", "Johannes", ""),
+         "1500", "1560", "Müller", "", "Johannes", "", None),
     ]
     for i in range(60):
         rows.append((f"9{i:05d}", "v", f"Ort {i}", "<p></p>",
                      f"Gemeinde Nummer {i} im Aargau.", "", "", "geo", "Orte",
-                     "", "", "", 0.0, 0.0, "", "", "", "", "", ""))
-    conn.executemany("INSERT INTO articles VALUES (" + ",".join("?" * 20) + ")", rows)
+                     "", "", "", 0.0, 0.0, "", "", "", "", "", "", None))
+    conn.executemany("INSERT INTO articles VALUES (" + ",".join("?" * 21) + ")", rows)
     conn.execute(
         "INSERT INTO articles_fts(rowid,id,title,content_text,category,"
         "lexical_class,family_name,first_name) "
@@ -540,8 +588,12 @@ def _semantic_corpus(tmp_path):
         ("000003", "Uzwil", "geo", [0.0, 1.0, 0.0]),
     ]
     for aid, title, cat, _ in articles:
-        conn.execute("INSERT INTO articles (id, title, category, content_text) "
-                     "VALUES (?,?,?,?)", (aid, title, cat, f"Text über {title}."))
+        author = "Historikerin A" if aid == "000001" else None
+        conn.execute(
+            "INSERT INTO articles (id, title, category, content_text, author) "
+            "VALUES (?,?,?,?,?)",
+            (aid, title, cat, f"Text über {title}.", author),
+        )
     for aid, title, cat, vec in articles:
         for index in (0, 1):     # two passages each, to exercise per_article
             cid = f"{aid}#{index}"
@@ -563,6 +615,7 @@ def test_semantic_search_ranks_by_cosine_similarity(tmp_path):
                               per_article=1)
     assert [h["title"] for h in hits] == ["Königsfelden", "Habsburg", "Uzwil"]
     assert hits[0]["score"] > hits[1]["score"] > hits[2]["score"]
+    assert hits[0]["author"] == "Historikerin A"
 
 
 def test_one_article_cannot_fill_the_result_set(tmp_path):
