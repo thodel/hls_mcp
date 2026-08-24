@@ -750,3 +750,27 @@ def test_migrate_leaves_articles_without_a_byline_alone(tmp_path):
 def test_migrate_on_a_missing_database_does_not_raise(tmp_path):
     # build_db.py has not run yet; startup must not die on that.
     assert db.migrate(str(tmp_path / "absent.db")) == []
+
+
+# ── Packaging ─────────────────────────────────────────────────────────────────
+
+def test_every_module_is_copied_into_the_image():
+    """The Dockerfile lists files individually instead of `COPY . .`.
+
+    A new module is then easy to add to the repository and forget here, and
+    nothing fails until the container starts: it builds cleanly, then
+    crash-loops on ModuleNotFoundError. That is exactly how article_metadata.py
+    reached production.
+    """
+    import pathlib, re
+
+    root = pathlib.Path(__file__).resolve().parent
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    copied = set(re.findall(r"([\w]+\.py)", dockerfile))
+    shipped = {
+        p.name for p in root.glob("*.py")
+        if not p.name.startswith("test_") and p.name != "conftest.py"
+    }
+    assert not shipped - copied, (
+        f"not COPYed into the image: {sorted(shipped - copied)}"
+    )
