@@ -682,3 +682,71 @@ def test_stats_on_a_corpus_with_no_index_explain_themselves(tmp_path):
     conn.commit(); conn.close()
     db.set_db_path(path)
     assert db.semantic_stats()["indexed"] is False
+
+
+# ── Schema migration ──────────────────────────────────────────────────────────
+
+def _legacy_articles_schema() -> str:
+    """The articles table as it stands on a deployed instance: no author."""
+    return """
+    CREATE TABLE articles (
+        id TEXT PRIMARY KEY, version TEXT, title TEXT, content_html TEXT,
+        content_text TEXT, time_span TEXT, orig_time TEXT, category TEXT,
+        lexical_class TEXT, orig_lexical TEXT, place_class TEXT,
+        orig_place TEXT, lat REAL, lon REAL, birth_date TEXT, death_date TEXT,
+        family_name TEXT, additional TEXT, first_name TEXT, gender TEXT
+    );
+    """
+
+
+def test_migrate_adds_the_author_column_to_an_existing_database(tmp_path):
+    """The deploy case: the database is bind-mounted and survives the rebuild,
+    so it still has the old schema while the new queries select a.author."""
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(_legacy_articles_schema())
+    con.execute(
+        "INSERT INTO articles (id, title, content_text) VALUES (?,?,?)",
+        ("000001", "Uzwil", "Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde."),
+    )
+    con.commit(); con.close()
+
+    applied = db.migrate(str(path))
+
+    assert applied, "migration reported no change"
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT author FROM articles").fetchone()[0] == "Beat Bühler"
+    con.close()
+
+
+def test_migrate_is_idempotent(tmp_path):
+    """It runs on every start, so a second run must be a no-op rather than a
+    duplicate-column error that takes the server down."""
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(_legacy_articles_schema())
+    con.commit(); con.close()
+
+    db.migrate(str(path))
+    assert db.migrate(str(path)) == []
+
+
+def test_migrate_leaves_articles_without_a_byline_alone(tmp_path):
+    # 3,385 of 33,506 have no byline; they must migrate to NULL, not to noise.
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(_legacy_articles_schema())
+    con.execute("INSERT INTO articles (id, title, content_text) VALUES (?,?,?)",
+                ("000002", "Ohne", "Ein Artikel ohne Byline."))
+    con.commit(); con.close()
+
+    db.migrate(str(path))
+
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT author FROM articles").fetchone()[0] is None
+    con.close()
+
+
+def test_migrate_on_a_missing_database_does_not_raise(tmp_path):
+    # build_db.py has not run yet; startup must not die on that.
+    assert db.migrate(str(tmp_path / "absent.db")) == []
