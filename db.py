@@ -1,6 +1,8 @@
 """
 db.py — SQLite query helpers for HLS MCP server.
 """
+from __future__ import annotations  # db.py already uses 3.10 syntax
+
 import os
 import re
 import sqlite3
@@ -34,7 +36,8 @@ CREATE TABLE IF NOT EXISTS articles (
     family_name   TEXT,
     additional    TEXT,
     first_name    TEXT,
-    gender        TEXT
+    gender        TEXT,
+    author        TEXT
 );
 CREATE TABLE IF NOT EXISTS persons (
     id          TEXT PRIMARY KEY,
@@ -98,12 +101,55 @@ CREATE INDEX IF NOT EXISTS ix_embeddings_model ON embeddings(model);
 """
 
 ARTICLE_BRIEF = ("id, title, category, lexical_class, time_span, "
-                 "lat, lon, family_name, first_name")
+                 "lat, lon, family_name, first_name, author")
 
 
 def set_db_path(path: str):
     global _DB_PATH
     _DB_PATH = path
+
+
+def migrate(path: str | None = None) -> list[str]:
+    """Bring an existing database up to the current schema.
+
+    `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+    so a column added to SCHEMA_SQL never reaches a deployed database. The
+    queries select it regardless, and every search then fails with "no such
+    column" — at the user, on the first request after a deploy, not at build
+    time. This runs at startup so the failure surfaces in the server log
+    instead.
+
+    Returns the migrations applied, so a caller can log what it changed.
+    """
+    from article_metadata import split_author_byline
+
+    applied: list[str] = []
+    con = sqlite3.connect(path or _DB_PATH)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(articles)")}
+        if not cols:
+            return applied  # No database yet; build_db.py creates it.
+
+        if "author" not in cols:
+            con.execute("ALTER TABLE articles ADD COLUMN author TEXT")
+            # Backfill from the stored body rather than re-importing the CSV:
+            # the byline is still in content_text, so this needs neither the
+            # source files nor a re-embedding run.
+            rows = con.execute(
+                "SELECT id, content_text FROM articles "
+                "WHERE content_text LIKE 'Autorin/Autor:%'"
+            ).fetchall()
+            updates = []
+            for aid, text in rows:
+                author, _ = split_author_byline(text or "")
+                if author:
+                    updates.append((author, aid))
+            con.executemany("UPDATE articles SET author = ? WHERE id = ?", updates)
+            con.commit()
+            applied.append(f"articles.author added, {len(updates)} backfilled")
+    finally:
+        con.close()
+    return applied
 
 
 @contextmanager
@@ -218,7 +264,7 @@ _BM25_WEIGHTS = _bm25_weights()
 _FTS_SQL = f"""
     SELECT a.id, a.title, a.category, a.lexical_class,
            snippet(articles_fts, 2, '<b>', '</b>', '…', 32) AS snippet,
-           a.lat, a.lon, a.time_span, a.family_name, a.first_name
+           a.lat, a.lon, a.time_span, a.family_name, a.first_name, a.author
     FROM articles_fts f
     JOIN articles a ON a.rowid = f.rowid
     WHERE articles_fts MATCH ?
@@ -229,7 +275,7 @@ _FTS_SQL = f"""
 _LIKE_SQL = """
     SELECT id, title, category, lexical_class,
            SUBSTR(content_text, 1, 120) AS snippet,
-           lat, lon, time_span, family_name, first_name
+           lat, lon, time_span, family_name, first_name, author
     FROM articles
     WHERE title LIKE ? ESCAPE '\\'
     LIMIT ?
@@ -468,7 +514,7 @@ def semantic_stats(model: str | None = None) -> dict[str, Any]:
 _SEMANTIC_SQL = """
     SELECT c.chunk_id, c.article_id, c.chunk_index, c.char_start, c.char_end,
            c.text, a.title, a.category, a.lexical_class, a.time_span,
-           a.family_name, a.first_name, a.lat, a.lon
+           a.family_name, a.first_name, a.lat, a.lon, a.author
     FROM chunks c JOIN articles a ON a.id = c.article_id
     WHERE c.chunk_id IN ({placeholders})
 """
@@ -539,6 +585,7 @@ def search_semantic(query_vector, limit: int = 20, model: str | None = None,
             "first_name": row[11],
             "lat": row[12],
             "lon": row[13],
+            "author": row[14],
         })
         if len(out) >= limit:
             break

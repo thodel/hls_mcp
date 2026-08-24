@@ -22,6 +22,8 @@ import re
 import struct
 from typing import Iterable, Optional
 
+from article_metadata import split_author_byline
+
 DEFAULT_MODEL = os.environ.get("HLS_EMBED_MODEL", "qwen3-embedding-0.6b")
 DEFAULT_BASE_URL = os.environ.get("GPUSTACK_BASE_URL", "https://gpustack.unibe.ch/v1")
 DEFAULT_BATCH = int(os.environ.get("HLS_EMBED_BATCH", "64"))
@@ -48,16 +50,10 @@ class EmbeddingError(RuntimeError):
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
 
-# HLS article bodies open with a byline that is the same shape in every article
-# and says nothing about the subject; it would otherwise be a large part of a
-# short article's first (and often only) chunk.
-_BYLINE_RE = re.compile(r"^\s*Autorin/Autor:\s*\n.*?\n", re.DOTALL)
-
-
 def clean_article_text(text: str) -> str:
     """Article body with the byline stripped and whitespace normalised."""
-    text = _BYLINE_RE.sub("", text or "", count=1)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    _, body = split_author_byline(text)
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
 def chunk_article(text: str, size: int = CHUNK_CHARS,

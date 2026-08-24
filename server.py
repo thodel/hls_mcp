@@ -177,6 +177,16 @@ def main(argv=None):
     db_module.set_db_path(args.db)
 
     logger.info(f"Database: {args.db}")
+
+    # Before anything reads the database. A schema change reaches a deployed
+    # instance only through this call: the bind-mounted database survives every
+    # image rebuild, so a new column exists in SCHEMA_SQL and nowhere else.
+    try:
+        for change in db_module.migrate():
+            logger.info(f"Migration: {change}")
+    except Exception as e:
+        logger.error(f"Migration failed, queries may fail: {e}")
+
     try:
         s = db_module.stats()
         logger.info(f"Corpus: {s['n_articles']:,} articles, {s['n_persons']:,} persons, "
