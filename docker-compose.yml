@@ -5,7 +5,11 @@ services:
     container_name: hls-mcp
     restart: unless-stopped
     ports:
-      - "8004:8004"
+      # Loopback only. nginx proxies /mcp/hls/mcp to 127.0.0.1:8004 on this same
+      # host, so nothing legitimate needs the port on the wire — and Basic auth
+      # over a plain host port would put the credentials in clear text on the
+      # network, which is the one thing the gate must not do.
+      - "127.0.0.1:8004:8004"
     volumes:
       # Where hls.db and its vectors live on the host. Set HLS_DATA_DIR in the
       # host .env; it must be writable by the user running compose, because
@@ -26,6 +30,11 @@ services:
       - GPUSTACK_BASE_URL=${GPUSTACK_BASE_URL:-https://gpustack.unibe.ch/v1}
       - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
       - HLS_EMBED_MODEL=${HLS_EMBED_MODEL:-qwen3-embedding-0.6b}
+      # HTTP Basic auth. Set both in the host .env — never here, and never in the
+      # repository. Unset HLS_AUTH_USER leaves the endpoint open, and the server
+      # says so in its startup log rather than failing quietly.
+      - HLS_AUTH_USER=${HLS_AUTH_USER:-}
+      - HLS_AUTH_PASS=${HLS_AUTH_PASS:-}
     healthcheck:
       test: ["CMD", "python", "-c",
              "import socket; socket.create_connection(('localhost', 8004), 3).close()"]

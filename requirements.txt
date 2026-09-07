@@ -6,3 +6,9 @@ mcp>=2.0.0,<3
 # multiply; openai is the client for the GPUStack embedding endpoint.
 numpy>=1.24
 openai>=1.30
+
+# server.py imports uvicorn directly to put the auth gate in front of the ASGI
+# app, so it is a direct dependency now. It arrives with mcp today; a transitive
+# dependency that an upstream release drops is a failure at start-up, not at
+# install, and this project has already paid for that once.
+uvicorn>=0.30

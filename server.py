@@ -205,8 +205,16 @@ def main(argv=None):
         logger.warning(f"Semantic search unavailable: {warm.get('reason')}")
 
     logger.info(f"Starting HLS MCP server on {args.host}:{args.port}{args.http_path}")
-    mcp.run(transport="streamable-http", host=args.host, port=args.port,
-            streamable_http_path=args.http_path)
+    # Not mcp.run(): the endpoint needs an authentication gate in front of it, and
+    # mcp.run() builds the ASGI app and serves it in one step with nothing in
+    # between. streamable_http_app() hands back the same Starlette app, so the
+    # transport behaves identically — only wrapped.
+    import uvicorn
+    import auth
+    app = auth.wrap(
+        mcp.streamable_http_app(streamable_http_path=args.http_path, host=args.host),
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
