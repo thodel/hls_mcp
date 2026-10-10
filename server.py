@@ -96,7 +96,10 @@ def get_article(article_id: str) -> dict:
     """Full article by HLS id (e.g. '001398')."""
     result = db_module.get_article(article_id)
     if not result:
-        return {"error": f"Article '{article_id}' not found."}
+        # `not_found`: «kenne ich nicht» maschinell von einem Ausfall zu
+        # unterscheiden (ch-h-bot#497). Der Text bleibt, weil dieser Server
+        # auch direkt von Menschen und Modellen gefragt wird.
+        return {"error": f"Article '{article_id}' not found.", "not_found": True}
     return result
 
 
@@ -138,7 +141,7 @@ def get_person(pid: str) -> dict:
     """Person record by HLS person id (e.g. 'per-001398')."""
     result = db_module.get_person(pid)
     if not result:
-        return {"error": f"Person '{pid}' not found."}
+        return {"error": f"Person '{pid}' not found.", "not_found": True}
     return result
 
 
@@ -153,7 +156,8 @@ def resource_stats() -> str:
 def resource_article(article_id: str) -> str:
     result = db_module.get_article(article_id)
     if not result:
-        return json.dumps({"error": f"Article '{article_id}' not found."})
+        return json.dumps({"error": f"Article '{article_id}' not found.",
+                           "not_found": True})
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
