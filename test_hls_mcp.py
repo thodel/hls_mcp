@@ -517,13 +517,14 @@ def test_a_malformed_weight_override_falls_back_to_the_defaults(monkeypatch, bad
 # No test here calls GPUStack. Vectors are synthesised, so the suite runs off
 # the UniBE network and in CI; only the pipeline's own smoke run needs the VPN.
 
+import corpus
 import embeddings as emb
 import struct as _struct
 
 
 def test_chunking_keeps_offsets_that_point_back_into_the_article():
     text = "\n\n".join(f"Absatz {i}. " + "Wort " * 60 for i in range(6))
-    chunks = emb.chunk_article(text, size=400, overlap=60)
+    chunks = emb.chunk_document(text, size=400, overlap=60)
     assert len(chunks) > 1
     for start, end, piece in chunks:
         # An offset that does not locate the passage in its article makes the
@@ -532,26 +533,26 @@ def test_chunking_keeps_offsets_that_point_back_into_the_article():
 
 
 def test_a_short_article_is_one_chunk():
-    assert emb.chunk_article("Kurzer Artikel.") == [(0, 15, "Kurzer Artikel.")]
+    assert emb.chunk_document("Kurzer Artikel.") == [(0, 15, "Kurzer Artikel.")]
 
 
 def test_empty_text_yields_no_chunks():
-    assert emb.chunk_article("   ") == []
+    assert emb.chunk_document("   ") == []
 
 
 def test_chunking_terminates_when_overlap_exceeds_the_window():
-    assert emb.chunk_article("x" * 500, size=100, overlap=200)
+    assert emb.chunk_document("x" * 500, size=100, overlap=200)
 
 
 def test_the_byline_is_stripped_before_embedding():
     # Every HLS body opens with the same byline shape; left in, it is a large
     # part of a short article's only chunk and says nothing about the subject.
-    cleaned = emb.clean_article_text("Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde.")
+    cleaned = corpus.clean_article_text("Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde.")
     assert cleaned == "Politische Gemeinde."
 
 
 def test_a_body_without_a_byline_is_untouched():
-    assert emb.clean_article_text("Politische Gemeinde.") == "Politische Gemeinde."
+    assert corpus.clean_article_text("Politische Gemeinde.") == "Politische Gemeinde."
 
 
 def test_vectors_round_trip_and_come_back_normalised():
@@ -575,10 +576,30 @@ def test_the_query_prefix_is_applied(monkeypatch):
                 seen["input"] = input
                 return type("R", (), {"data": [type("D", (), {"embedding": [1.0, 0.0]})()]})()
 
-    emb.embed_query("Wer war Agnes?", client=FakeClient())
+    corpus.embed_query("Wer war Agnes?", client=FakeClient())
     # Qwen3-Embedding is instruction-aware; dropping this costs retrieval quality.
     assert seen["input"][0].startswith("Instruct:")
+    assert "encyclopaedia" in seen["input"][0]   # the HLS prefix, not the shared default
     assert seen["input"][0].endswith("Wer war Agnes?")
+
+
+@pytest.mark.parametrize("entry", ["server", "embed_db"])
+def test_the_vendored_embeddings_read_the_hls_settings(entry):
+    # embeddings.py is byte-identical across the fleet and finds HLS_EMBED_MODEL
+    # and the other HLS_* settings only through MCP_ENV_PREFIX, which corpus.py
+    # sets before importing it. Without that, an override would be read by
+    # nothing and the server would embed with a model the index was not built
+    # with.
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k != "MCP_ENV_PREFIX"}
+    env["HLS_EMBED_MODEL"] = "probe-model"
+    out = subprocess.run(
+        [sys.executable, "-c",
+         f"import {entry}, embeddings; print(embeddings.ENV_PREFIX, embeddings.DEFAULT_MODEL)"],
+        cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
+        capture_output=True, text=True)
+    assert out.stdout.split() == ["HLS", "probe-model"], out.stderr
 
 
 def _semantic_corpus(tmp_path):

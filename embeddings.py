@@ -1,46 +1,61 @@
 #!/usr/bin/env python3
 """
-embeddings.py — the embedding layer shared by the pipeline and the server.
+embeddings.py — the embedding layer every MCP server in this fleet shares.
 
-The MCP server is where an institution's embeddings live: a client asks a
-question in natural language and the server answers with the passages that mean
-the same thing, rather than the ones that happen to share keywords. Keyword
-search cannot do that across languages — a French question does not retrieve
-German articles — and cross-language retrieval is a requirement of this corpus.
+VENDORED FILE. The canonical copy lives in hls_mcp; the copies in kf_mcp,
+dodis_mcp and infoclio_mcp are meant to be byte-identical, so that a drift check
+is a checksum rather than a diff review. Corpus-specific behaviour goes in the
+calling repo, never in here — that is what keeps them identical.
+
+The MCP server is where an institution's embeddings belong: a client asks a
+question and the server answers with the passages that mean the same thing,
+rather than the ones that happen to share keywords. A client cannot embed a
+corpus it never receives, so this cannot live on the client side.
 
 Vectors come from GPUStack (`qwen3-embedding-0.6b`, 1024 dimensions), are
-L2-normalised on the way in, and are stored as float32 BLOBs in SQLite. At
-33,506 articles the whole matrix is well under 250 MB, so similarity is an
-honest brute-force dot product over a numpy array — no index, nothing to tune,
-and exact results.
+L2-normalised on the way in, and are stored as float32 BLOBs in SQLite. At the
+scale of these corpora — tens of thousands of passages — similarity is an honest
+brute-force dot product over a numpy array: exact results, no index, and no
+recall parameter to get wrong.
+
+Per-repo configuration is the ENV_PREFIX below and the `clean` callable passed
+to `chunk_document`; nothing else should differ.
 """
 
 from __future__ import annotations
 
+import time
+
+import sys
+
 import os
 import re
 import struct
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
-from article_metadata import split_author_byline
+# Set by each repo: "HLS", "KF", "DODIS", "INFOCLIO". Everything else is shared.
+ENV_PREFIX = os.environ.get("MCP_ENV_PREFIX", "MCP")
 
-DEFAULT_MODEL = os.environ.get("HLS_EMBED_MODEL", "qwen3-embedding-0.6b")
+
+def _env(name: str, default: str) -> str:
+    """Read <PREFIX>_<NAME>, falling back to MCP_<NAME> and then the default."""
+    return os.environ.get(f"{ENV_PREFIX}_{name}",
+                          os.environ.get(f"MCP_{name}", default))
+
+
+DEFAULT_MODEL = _env("EMBED_MODEL", "qwen3-embedding-0.6b")
 DEFAULT_BASE_URL = os.environ.get("GPUSTACK_BASE_URL", "https://gpustack.unibe.ch/v1")
-DEFAULT_BATCH = int(os.environ.get("HLS_EMBED_BATCH", "64"))
+DEFAULT_BATCH = int(_env("EMBED_BATCH", "64"))
 
-# Passage windowing. 1000 characters is roughly a paragraph of an HLS article —
-# small enough that a hit points at the relevant passage, large enough to carry
-# its own context into an answer.
-CHUNK_CHARS = int(os.environ.get("HLS_CHUNK_CHARS", "1000"))
-CHUNK_OVERLAP = int(os.environ.get("HLS_CHUNK_OVERLAP", "150"))
+CHUNK_CHARS = int(_env("CHUNK_CHARS", "1000"))
+CHUNK_OVERLAP = int(_env("CHUNK_OVERLAP", "150"))
 
 # Qwen3-Embedding is instruction-aware: queries carry a task instruction and
-# documents do not. Skipping this costs real retrieval quality, so it is applied
-# by default and can be overridden for a differently-trained model.
-QUERY_PREFIX = os.environ.get(
-    "HLS_EMBED_QUERY_PREFIX",
-    "Instruct: Given a question about Swiss history, retrieve passages from an "
-    "encyclopaedia that answer it\nQuery: ",
+# documents do not. Skipping this costs real retrieval quality.
+QUERY_PREFIX = _env(
+    "EMBED_QUERY_PREFIX",
+    "Instruct: Given a question about Swiss history, retrieve passages that "
+    "answer it\nQuery: ",
 )
 
 
@@ -50,21 +65,21 @@ class EmbeddingError(RuntimeError):
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
 
-def clean_article_text(text: str) -> str:
-    """Article body with the byline stripped and whitespace normalised."""
-    _, body = split_author_byline(text)
-    return re.sub(r"\n{3,}", "\n\n", body).strip()
+def chunk_document(text: str, size: int = CHUNK_CHARS,
+                   overlap: int = CHUNK_OVERLAP,
+                   clean: Optional[Callable[[str], str]] = None
+                   ) -> list[tuple[int, int, str]]:
+    """Window a document into ``(char_start, char_end, text)`` passages.
 
+    ``clean`` is the one corpus-specific hook: HLS strips a byline, Königsfelden
+    resolves abbreviations to their expanded reading, dodis and infoclio need
+    nothing. Offsets are into the *cleaned* text, so a hit can be located in the
+    document it came from.
 
-def chunk_article(text: str, size: int = CHUNK_CHARS,
-                  overlap: int = CHUNK_OVERLAP) -> list[tuple[int, int, str]]:
-    """Window an article into ``(char_start, char_end, text)`` passages.
-
-    Offsets are into the *cleaned* text, so a hit can be located in the article
-    it came from. Windows break at a paragraph or sentence boundary when one
-    falls in the back half, so passages do not end mid-clause.
+    Windows break at a paragraph or sentence boundary when one falls in the back
+    half, so passages do not end mid-clause.
     """
-    text = (text or "").strip()
+    text = (clean(text) if clean else (text or "")).strip()
     if not text:
         return []
     if len(text) <= size:
@@ -105,7 +120,7 @@ def pack(vector: Iterable[float]) -> bytes:
 
 
 def unpack(blob: bytes) -> list[float]:
-    """Unpack a stored vector (mostly for tests and inspection)."""
+    """Unpack a stored vector (for tests and inspection)."""
     return list(struct.unpack(f"<{len(blob) // 4}f", blob))
 
 
@@ -128,9 +143,7 @@ def get_client(base_url: Optional[str] = None, api_key: Optional[str] = None):
     try:
         from openai import OpenAI
     except ImportError as exc:
-        raise EmbeddingError(
-            "the `openai` package is required for embeddings — pip install openai"
-        ) from exc
+        raise EmbeddingError("the `openai` package is required — pip install openai") from exc
     key = api_key or os.environ.get("GPUSTACK_API_KEY")
     if not key:
         raise EmbeddingError(
@@ -141,21 +154,37 @@ def get_client(base_url: Optional[str] = None, api_key: Optional[str] = None):
     return client
 
 
+# A transient failure mid-run — GPUStack dropping one connection, a timeout
+# — used to end a forty-minute embedding pass at chunk 306,000 of 647,000
+# (2026-09-10). These waits, in seconds, sit between attempts; 401/403 are
+# not transient and fail at once.
+RETRY_WAITS = (5, 15, 45, 90, 180)
+
+
 def embed_texts(texts: list[str], model: str = DEFAULT_MODEL,
-                client=None) -> list[list[float]]:
+                client=None, waits=RETRY_WAITS) -> list[list[float]]:
     """Embed a batch of texts. Returns raw (un-normalised) vectors."""
     if not texts:
         return []
     client = client or get_client()
-    try:
-        response = client.embeddings.create(model=model, input=texts)
-    except Exception as exc:
-        detail = str(exc)
-        if "403" in detail:
-            detail += ("  — gpustack.unibe.ch denies requests from outside the "
-                       "UniBE network before checking the API key; connect the VPN.")
-        raise EmbeddingError(f"embedding request failed: {detail}") from exc
-    return [item.embedding for item in response.data]
+    attempt = 0
+    while True:
+        try:
+            response = client.embeddings.create(model=model, input=texts)
+            return [item.embedding for item in response.data]
+        except Exception as exc:
+            detail = str(exc)
+            if "403" in detail:
+                detail += ("  — gpustack.unibe.ch denies requests from outside the "
+                           "UniBE network before checking the API key; connect the VPN.")
+            fatal = "401" in detail or "403" in detail
+            if fatal or attempt >= len(waits):
+                raise EmbeddingError(f"embedding request failed: {detail}") from exc
+            wait = waits[attempt]
+            attempt += 1
+            print(f"  embedding request failed ({detail[:80]}); retry {attempt} "
+                  f"in {wait}s", file=sys.stderr)
+            time.sleep(wait)
 
 
 def embed_query(query: str, model: str = DEFAULT_MODEL, client=None) -> list[float]:

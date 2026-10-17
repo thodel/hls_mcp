@@ -4,10 +4,13 @@ WORKDIR /app
 # Listed explicitly rather than `COPY . .` so the image stays small — which
 # means a new module has to be added here too, or the container starts and
 # then crash-loops on the import.
-COPY article_metadata.py auth.py build_db.py db.py embed_db.py embeddings.py \
+COPY article_metadata.py auth.py build_db.py corpus.py db.py embed_db.py embeddings.py \
      server.py requirements.txt ./
 
 # Install deps, then delete build tools
+# embeddings.py is vendored across the fleet and reads HLS_* settings by this prefix.
+ENV MCP_ENV_PREFIX=HLS
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Default: build DB from source CSV if db does not exist

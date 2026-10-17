@@ -28,6 +28,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+import corpus
 import db as db_module
 import embeddings as emb
 
@@ -58,9 +59,9 @@ def build_chunks(conn: sqlite3.Connection, limit: int | None,
     written = 0
     batch: list[tuple] = []
     for article_id, title, text in rows:
-        cleaned = emb.clean_article_text(text)
+        cleaned = corpus.clean_article_text(text)
         for index, (start, end, piece) in enumerate(
-                emb.chunk_article(cleaned, size, overlap)):
+                emb.chunk_document(cleaned, size, overlap)):
             # The title rides on the first line of every passage: a passage
             # lifted out of the middle of an article otherwise loses all trace
             # of who or what it is about, and embeds as if it were anonymous.
