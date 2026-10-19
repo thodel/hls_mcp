@@ -799,3 +799,127 @@ def test_every_module_is_copied_into_the_image():
     assert not shipped - copied, (
         f"not COPYed into the image: {sorted(shipped - copied)}"
     )
+
+
+# ── Multi-valued columns come out as lists (issue #10) ───────────────────────
+#
+# The CSV export writes time_span and lexical_class as repr() of a Python list
+# and build_db.py copies that text into the column. Measured on the live server
+# on 19.10.2026: search_semantic, search_articles and get_article all returned
+#     "time_span": "['1701–1750', '1751–1800', …]"
+# — a string a JSON client has to parse itself. These are the measured strings.
+
+MEASURED_TIME_SPAN = ("['1701–1750', '1751–1800', '1801–1850', '901–1000', "
+                      "'1001–1050']")
+MEASURED_LEXICAL = ("['Orte & Räume -> Religiös-kirchliche Einheiten -> "
+                    "Kloster, Abtei, Propstei', "
+                    "'Orte & Räume -> Kulturerbe -> Kirche, Kapelle, Friedhof']")
+
+
+def test_as_list_parses_the_stored_repr_and_normalises_the_rest():
+    assert db.as_list(MEASURED_TIME_SPAN) == [
+        "1701–1750", "1751–1800", "1801–1850", "901–1000", "1001–1050"]
+    # The comma inside «Kloster, Abtei, Propstei» is not a list separator.
+    assert db.as_list(MEASURED_LEXICAL) == [
+        "Orte & Räume -> Religiös-kirchliche Einheiten -> Kloster, Abtei, Propstei",
+        "Orte & Räume -> Kulturerbe -> Kirche, Kapelle, Friedhof"]
+    assert db.as_list("[]") == []
+    assert db.as_list("") == [] and db.as_list(None) == []
+    assert db.as_list("1484-1531") == ["1484-1531"], "a plain value is a one-item list"
+    assert db.as_list(["a", "b"]) == ["a", "b"]
+    # Not a list literal: handed through whole rather than raising or vanishing.
+    assert db.as_list("[unbalanced") == ["[unbalanced"]
+    assert db.as_list("[1 +]") == ["[1 +]"]
+    assert db.as_list("['a', 1]") == ["a", "1"]
+
+
+def _corpus_with_measured_strings(tmp_path):
+    path = str(tmp_path / "hls_lists.db")
+    conn = _sqlite3.connect(path)
+    conn.executescript(db.SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO articles (id, title, category, content_text, time_span, orig_time, "
+        "lexical_class, orig_lexical, place_class, orig_place, family_name, first_name) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("012002", "Königsfelden", "geo", "Kloster bei Brugg.", MEASURED_TIME_SPAN,
+         "['Administration.Taxonomies.Times.23']", MEASURED_LEXICAL,
+         "['Administration.Taxonomies.Lexicography.1', 'Administration.Taxonomies.Lexicography.2']",
+         "['Schweiz -> AG']", "['Administration.Taxonomies.Places.00200.00100']", "", ""))
+    conn.execute(
+        "INSERT INTO articles (id, title, category, content_text, time_span, lexical_class, "
+        "family_name, first_name) VALUES (?,?,?,?,?,?,?,?)",
+        ("001398", "Zwingli, Ulrich", "bio", "Reformator.", "['1451–1500', '1501–1550']",
+         "['Personen -> Religion -> Reformator']", "Zwingli", "Ulrich"))
+    conn.execute("INSERT INTO persons VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("per-001398", "001398", "Zwingli", "Ulrich", "", "1484", "1531", "m", "bio"))
+    conn.execute(
+        "INSERT INTO articles_fts(rowid,id,title,content_text,category,lexical_class,"
+        "family_name,first_name) SELECT rowid,id,title,content_text,category,lexical_class,"
+        "family_name,first_name FROM articles")
+    conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                 ("012002#0", "012002", 0, 0, 18, "Kloster bei Brugg."))
+    conn.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
+                 ("012002#0", "test-model", 3, emb.pack([1.0, 0.0, 0.0])))
+    conn.commit(); conn.close()
+    db._VECTOR_CACHE.clear()
+    db.set_db_path(path)
+
+
+def _is_list_of_str(value):
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+def test_every_tool_returns_the_classification_fields_as_lists(tmp_path):
+    _corpus_with_measured_strings(tmp_path)
+    expected_spans = ["1701–1750", "1751–1800", "1801–1850", "901–1000", "1001–1050"]
+
+    article = db.get_article("012002")
+    for col in db.LIST_COLUMNS:
+        assert _is_list_of_str(article[col]), f"get_article.{col} = {article[col]!r}"
+    assert article["time_span"] == expected_spans
+    assert article["lexical_class"] == [
+        "Orte & Räume -> Religiös-kirchliche Einheiten -> Kloster, Abtei, Propstei",
+        "Orte & Räume -> Kulturerbe -> Kirche, Kapelle, Friedhof"]
+    assert article["place_class"] == ["Schweiz -> AG"]
+
+    hit = db.search_articles("Königsfelden")[0]
+    assert hit["time_span"] == expected_spans and _is_list_of_str(hit["lexical_class"])
+
+    hit = db.search_articles("Kloster")[0]       # the LIKE fallback path, title search
+    assert _is_list_of_str(hit["time_span"])
+
+    hit = db.list_articles_by_category("geo")[0]
+    assert hit["time_span"] == expected_spans
+
+    hit = db.list_articles_by_lexical_class("Kloster")[0]
+    assert len(hit["lexical_class"]) == 2
+
+    # The slots are stored unordered and the measured list ends on '1001–1050':
+    # the overlap test has to use the envelope, not the first and last year.
+    hit = db.list_articles_by_year(1700, 1720)[0]
+    assert hit["id"] == "012002" and hit["time_span"] == expected_spans
+    assert db.list_articles_by_year(1851, 2000) == [], "nothing after the envelope (…1850)"
+    assert db.list_articles_by_year(800, 900) == [], "nothing before the envelope (901…)"
+
+    person = db.search_persons("Zwingli")[0]
+    assert person["lexical_class"] == ["Personen -> Religion -> Reformator"]
+
+    hit = db.search_semantic([1.0, 0.0, 0.0], limit=1, model="test-model")[0]
+    assert hit["time_span"] == expected_spans
+    assert hit["lexical_class"][0].endswith("Kloster, Abtei, Propstei")
+
+    # Negative form of the issue: nothing that leaves the db layer is a repr string.
+    for rec in (article, hit, person):
+        for col in db.LIST_COLUMNS:
+            if col in rec:
+                assert not (isinstance(rec[col], str) and rec[col].startswith("['")), (col, rec[col])
+
+
+def test_the_tool_descriptions_say_the_fields_are_arrays():
+    pytest.importorskip("mcp", reason="mcp SDK not installed")
+    import anyio
+    import server as server_module
+    docs = {t.name: t.description or "" for t in anyio.run(server_module.mcp.list_tools)}
+    for tool in ("search_articles", "search_semantic", "get_article"):
+        assert "time_span" in docs[tool] and "lexical_class" in docs[tool], tool
+        assert "array" in docs[tool].lower(), tool

@@ -57,7 +57,12 @@ def corpus_stats() -> dict:
 
 @mcp.tool()
 def search_articles(query: str, limit: int = 20) -> list[dict]:
-    """Full-text search across all HLS articles (title, text, lexical class)."""
+    """Full-text search across all HLS articles (title, text, lexical class).
+
+    `lexical_class` and `time_span` are multi-valued and come back as JSON
+    arrays: the lexical classes an article is filed under, and the
+    half-century slots it is assigned to ('1701–1750', …).
+    """
     return db_module.search_articles(query, limit)
 
 
@@ -70,7 +75,9 @@ def search_semantic(query: str, limit: int = 10, category: str = "") -> list[dic
     French question retrieves German articles and a description retrieves an
     article whose title you did not know. Each hit is one passage, with `snippet`
     holding its full text, `score` the cosine similarity (higher is closer), and
-    `id` the article it belongs to.
+    `id` the article it belongs to. `lexical_class` and `time_span` are
+    multi-valued and come back as JSON arrays (half-century slots such as
+    '1701–1750').
 
     Optionally restrict to a category: bio, fam, geo, tem.
     """
@@ -94,7 +101,13 @@ def semantic_index_stats() -> dict:
 
 @mcp.tool()
 def get_article(article_id: str) -> dict:
-    """Full article by HLS id (e.g. '001398')."""
+    """Full article by HLS id (e.g. '001398').
+
+    The classification fields are multi-valued JSON arrays: `time_span`
+    (half-century slots, '1701–1750'), `lexical_class` (one path per class,
+    'Orte & Räume -> … -> Kloster, Abtei, Propstei'), `place_class`, and their
+    `orig_*` taxonomy ids.
+    """
     result = db_module.get_article(article_id)
     if not result:
         # `not_found`: «kenne ich nicht» maschinell von einem Ausfall zu
