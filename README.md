@@ -208,6 +208,13 @@ the SQL.
 > and several passing mentions ahead of the place itself; re-check that query after
 > deploying and adjust the title weight if it still does.
 
+**Multi-valued fields.** `time_span`, `lexical_class`, `place_class` and their `orig_*`
+taxonomy ids are lists — an article on a monastery is filed under two lexical classes
+and spans fifteen half-century slots. The CSV export writes them as Python's `repr()`
+of a list (`"['1701–1750', '1751–1800']"`) and the database keeps that text; every
+tool parses it at read time and returns a JSON array, never that string (issue #10).
+A plain value becomes a one-item list, an empty one `[]`.
+
 **Year ranges.** `list_articles_by_year` reads the free-text `time_span` field, so the
 overlap test runs in Python — over the candidate set *before* paging. It examines at
 most `YEAR_SCAN_CAP` (5000) rows.

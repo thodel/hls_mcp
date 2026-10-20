@@ -3,6 +3,7 @@ db.py — SQLite query helpers for HLS MCP server.
 """
 from __future__ import annotations  # db.py already uses 3.10 syntax
 
+import ast
 import os
 import re
 import sqlite3
@@ -163,12 +164,60 @@ def conn():
         con.close()
 
 
+# The classification columns hold several values per article: an article on a
+# monastery sits in two lexical classes and spans fifteen half-centuries. The
+# CSV export writes each of them as Python's repr() of a list —
+#
+#     "['1701–1750', '1751–1800']"
+#
+# — and build_db.py copies that text into the TEXT column unchanged, so the
+# database holds the repr, not JSON (measured against the live server on
+# 19.10.2026, issue #10). A client reading JSON got a string it had to parse
+# with ast.literal_eval or a regex, and for lexical_class the list separator
+# ", " is not distinguishable from a comma inside a term. The columns are
+# parsed here, at read time, so no rebuild or migration is needed and every
+# tool returns a real list.
+LIST_COLUMNS = ("time_span", "orig_time", "lexical_class", "orig_lexical",
+                "place_class", "orig_place")
+
+
+def as_list(value) -> list[str]:
+    """A multi-valued column as a list of strings, whatever the stored form.
+
+    repr() of a list parses to its items; a plain value becomes a one-item
+    list; NULL and '' become []. The output type is always list, so a client
+    never has to branch on the shape.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            parsed = None
+        if isinstance(parsed, (list, tuple)):
+            return [str(v) for v in parsed]
+    return [text]
+
+
+def _listify(d: dict) -> dict:
+    for col in LIST_COLUMNS:
+        if col in d:
+            d[col] = as_list(d[col])
+    return d
+
+
 def _row(r) -> dict | None:
-    return dict(r) if r else None
+    return _listify(dict(r)) if r else None
 
 
 def _rows(rs) -> list[dict]:
-    return [dict(r) for r in rs]
+    return [_listify(dict(r)) for r in rs]
 
 
 def clamp(limit, default, cap=MAX_LIMIT) -> int:
@@ -348,6 +397,12 @@ def list_articles_by_year(
     in Python. It is applied to the id/time_span pairs *before* paging — an earlier
     version paged first and filtered second, which meant the year range only ever
     saw whichever rows happened to sort first and silently returned the wrong set.
+
+    The stored value is a list of half-century slots in no particular order
+    ("['1701–1750', …, '1401–1450']" on the live Uzwil record), so the span is
+    the envelope — the smallest and the largest year anywhere in it — not the
+    first and the last year as written. First/last missed every article whose
+    list happened to end on an early slot.
     """
     limit, offset = clamp(limit, 100), clamp_offset(offset)
     with conn() as c:
@@ -360,10 +415,10 @@ def list_articles_by_year(
 
         ids = []
         for row in candidates:
-            years = _YEAR_RE.findall(row["time_span"] or "")
+            years = [int(y) for y in _YEAR_RE.findall(" ".join(as_list(row["time_span"])))]
             if not years:
                 continue
-            if int(years[0]) <= year_to and int(years[-1]) >= year_from:
+            if min(years) <= year_to and max(years) >= year_from:
                 ids.append(row["id"])
 
         page = ids[offset:offset + limit]
@@ -374,7 +429,7 @@ def list_articles_by_year(
             f"SELECT {ARTICLE_BRIEF} FROM articles WHERE id IN ({placeholders})", page
         ).fetchall()
 
-    by_id = {r["id"]: dict(r) for r in rows}
+    by_id = {r["id"]: _listify(dict(r)) for r in rows}
     return [by_id[i] for i in page if i in by_id]
 
 
@@ -574,13 +629,13 @@ def search_semantic(query_vector, limit: int = 20, model: str | None = None,
             "chunk_id": chunk_id,
             "title": row[6],
             "category": row[7],
-            "lexical_class": row[8],
+            "lexical_class": as_list(row[8]),
             "snippet": row[5],
             "score": round(score, 4),
             "chunk_index": row[2],
             "char_start": row[3],
             "char_end": row[4],
-            "time_span": row[9],
+            "time_span": as_list(row[9]),
             "family_name": row[10],
             "first_name": row[11],
             "lat": row[12],
