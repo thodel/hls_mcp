@@ -5,6 +5,7 @@ WORKDIR /app
 # means a new module has to be added here too, or the container starts and
 # then crash-loops on the import.
 COPY article_metadata.py auth.py build_db.py corpus.py db.py embed_db.py embeddings.py \
+     migrate_parent_id.py vectorstore.py \
      server.py requirements.txt ./
 
 # Install deps, then delete build tools

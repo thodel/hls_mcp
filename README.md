@@ -89,12 +89,22 @@ Use `search_articles` when the exact string matters (a name, a spelling, a phras
 GPUSTACK_API_KEY=... python embed_db.py            # whole corpus
 GPUSTACK_API_KEY=... python embed_db.py --limit 500 # trial run on a sample
 GPUSTACK_API_KEY=... python embed_db.py --recompute # after changing the model
+python embed_db.py --status                         # coverage, nothing pending?
 ```
 
-Articles are windowed into ~1000-character passages (150 overlap), each prefixed with
-its article title so a passage lifted from mid-article still carries its subject, and
-embedded with `qwen3-embedding-0.6b` on GPUStack (1024 dimensions). Vectors are stored
-L2-normalised as float32 BLOBs.
+`embeddings.py`, `vectorstore.py` and `embed_db.py` are **vendored and
+byte-identical** across the fleet (canonical copy: `eperiodica_mcp`; see
+`docs/MCP_PROVIDER_PATTERN.md` in ch-h-bot, drift check `scripts/check_vendored_drift.py`
+there). What is HLS lives in `corpus.py`: where the database is, `iter_documents`
+(the article title as the head of every passage, verbatim) and `clean` (the byline
+off, blank runs collapsed). `db.py` supplies the join and the shape of a hit.
+
+Articles are windowed into ~1000-character passages (150 overlap), each with its
+article title on the first line so a passage lifted from mid-article still carries its
+subject, and embedded with `qwen3-embedding-0.6b` on GPUStack (1024 dimensions).
+Vectors are stored L2-normalised as float32 BLOBs. A hit's `snippet` is the passage
+without that title line (the fleet rule from thodel/eperiodica_mcp#8); `char_start`
+and `char_end` point into the cleaned article text.
 
 Runs are **resumable** — chunks already embedded with the same model are skipped, and
 each batch is committed — so an interrupted run continues rather than restarting.
@@ -106,6 +116,27 @@ Measured on the full corpus (2026-08-21): **57,538 passages over all 33,506 arti
 holds 225 MB of vectors resident and loads them at startup, so no user query pays for
 the load. A search is one matrix multiply — exact, no approximate index, nothing to
 tune — and takes ~100 ms including the round trip to embed the query.
+
+### Migrating an index built before #14
+
+An index built by this repo's own `embed_db.py` (until 22.10.2026) names the parent
+column `chunks.article_id` and the run column `embedding_runs.n_articles`; the shared
+files expect `parent_id` and `n_parents`. The passages themselves are the same — the
+head and the cleaning are what the old code did, measured over all 57,538 live
+passages in thodel/ch-h-bot#555 — so the migration is a rename, no re-embed:
+
+```bash
+systemctl --user stop mcp-hls                   # the old db.py would ask for article_id
+cp hls.db hls.db.pre-parent-id                  # the backup is yours, the script makes none
+python migrate_parent_id.py --db hls.db         # one transaction, idempotent, integrity_check
+git pull && systemctl --user start mcp-hls
+python embed_db.py --db hls.db --status         # n_chunks unchanged, nothing pending
+```
+
+Code and rename have to arrive together: a running old server answers every
+`search_semantic` on a renamed database with «no such column». `semantic_index_stats`
+now reports the parent counts as `n_indexed`/`n_total` (was `n_articles_indexed`/
+`n_articles_total`).
 
 ### Query-time requirements
 
@@ -238,7 +269,8 @@ on.
 
 ```bash
 pip install pytest
-pytest test_hls_mcp.py
+pytest                      # test_hls_mcp.py, test_auth.py, test_not_found_contract.py,
+                            # test_migrate_parent_id.py
 ```
 
 Unit tests build their own throwaway database and need no setup. DB and server tests
