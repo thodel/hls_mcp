@@ -74,10 +74,10 @@ def search_semantic(query: str, limit: int = 10, category: str = "") -> list[dic
     text: it embeds the question and returns the passages closest to it, so a
     French question retrieves German articles and a description retrieves an
     article whose title you did not know. Each hit is one passage, with `snippet`
-    holding its full text, `score` the cosine similarity (higher is closer), and
-    `id` the article it belongs to. `lexical_class` and `time_span` are
-    multi-valued and come back as JSON arrays (half-century slots such as
-    '1701–1750').
+    holding its text (without the title line the vector carries), `score` the
+    cosine similarity (higher is closer), and `id` the article it belongs to.
+    `lexical_class` and `time_span` are multi-valued and come back as JSON
+    arrays (half-century slots such as '1701–1750').
 
     Optionally restrict to a category: bio, fam, geo, tem.
     """

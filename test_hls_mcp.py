@@ -547,12 +547,12 @@ def test_chunking_terminates_when_overlap_exceeds_the_window():
 def test_the_byline_is_stripped_before_embedding():
     # Every HLS body opens with the same byline shape; left in, it is a large
     # part of a short article's only chunk and says nothing about the subject.
-    cleaned = corpus.clean_article_text("Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde.")
+    cleaned = corpus.clean("Autorin/Autor:\nBeat Bühler\nPolitische Gemeinde.")
     assert cleaned == "Politische Gemeinde."
 
 
 def test_a_body_without_a_byline_is_untouched():
-    assert corpus.clean_article_text("Politische Gemeinde.") == "Politische Gemeinde."
+    assert corpus.clean("Politische Gemeinde.") == "Politische Gemeinde."
 
 
 def test_vectors_round_trip_and_come_back_normalised():
@@ -620,7 +620,7 @@ def _semantic_corpus(tmp_path):
             (aid, title, cat, f"Text über {title}.", author),
         )
     for aid, title, cat, vec in articles:
-        for index in (0, 1):     # two passages each, to exercise per_article
+        for index in (0, 1):     # two passages each, to exercise per_parent
             cid = f"{aid}#{index}"
             conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
                          (cid, aid, index, 0, 10, f"{title} Passage {index}"))
@@ -628,7 +628,6 @@ def _semantic_corpus(tmp_path):
                          (cid, "test-model", 3, emb.pack(vec)))
     conn.commit()
     conn.close()
-    db._VECTOR_CACHE.clear()
     db.set_db_path(path)
     return path
 
@@ -637,7 +636,7 @@ def test_semantic_search_ranks_by_cosine_similarity(tmp_path):
     _semantic_corpus(tmp_path)
     # One passage per article, so this checks the ordering and nothing else.
     hits = db.search_semantic([1.0, 0.0, 0.0], limit=3, model="test-model",
-                              per_article=1)
+                              per_parent=1)
     assert [h["title"] for h in hits] == ["Königsfelden", "Habsburg", "Uzwil"]
     assert hits[0]["score"] > hits[1]["score"] > hits[2]["score"]
     assert hits[0]["author"] == "Historikerin A"
@@ -648,14 +647,14 @@ def test_one_article_cannot_fill_the_result_set(tmp_path):
     # other article that answers the question.
     _semantic_corpus(tmp_path)
     hits = db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
-                              per_article=1)
+                              per_parent=1)
     assert len({h["id"] for h in hits}) == len(hits)
 
 
 def test_the_per_article_cap_can_be_raised(tmp_path):
     _semantic_corpus(tmp_path)
     hits = db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
-                              per_article=2)
+                              per_parent=2)
     assert sum(1 for h in hits if h["id"] == "000001") == 2
 
 
@@ -698,6 +697,11 @@ def test_semantic_stats_report_coverage(tmp_path):
     assert stats["indexed"] and stats["n_chunks"] == 6
     assert stats["coverage"] == 1.0
     assert stats["models"][0]["model"] == "test-model"
+    # The shared vectorstore.stats names the parent counts n_indexed/n_total;
+    # the HLS-only n_articles_indexed/n_articles_total went with #14, and no
+    # client read them (ch-h-bot#555).
+    assert (stats["n_indexed"], stats["n_total"]) == (3, 3)
+    assert "n_articles_indexed" not in stats and "n_articles_total" not in stats
 
 
 def test_stats_on_a_corpus_with_no_index_explain_themselves(tmp_path):
@@ -861,7 +865,6 @@ def _corpus_with_measured_strings(tmp_path):
     conn.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
                  ("012002#0", "test-model", 3, emb.pack([1.0, 0.0, 0.0])))
     conn.commit(); conn.close()
-    db._VECTOR_CACHE.clear()
     db.set_db_path(path)
 
 
