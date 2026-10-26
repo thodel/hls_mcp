@@ -29,7 +29,7 @@ services:
       # the UniBE network only.
       - GPUSTACK_BASE_URL=${GPUSTACK_BASE_URL:-https://gpustack.unibe.ch/v1}
       - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
-      - HLS_EMBED_MODEL=${HLS_EMBED_MODEL:-qwen3-embedding-0.6b}
+      - HLS_EMBED_MODEL=${HLS_EMBED_MODEL:-qwen3-embedding-4b}
       # HTTP Basic auth. Set both in the host .env — never here, and never in the
       # repository. Unset HLS_AUTH_USER leaves the endpoint open, and the server
       # says so in its startup log rather than failing quietly.

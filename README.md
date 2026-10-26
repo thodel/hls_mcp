@@ -101,7 +101,8 @@ off, blank runs collapsed). `db.py` supplies the join and the shape of a hit.
 
 Articles are windowed into ~1000-character passages (150 overlap), each with its
 article title on the first line so a passage lifted from mid-article still carries its
-subject, and embedded with `qwen3-embedding-0.6b` on GPUStack (1024 dimensions).
+subject, and embedded with `qwen3-embedding-4b` on GPUStack (2560 dimensions; until 24.10.2026
+`qwen3-embedding-0.6b`, 1024 — ch-h-bot#570).
 Vectors are stored L2-normalised as float32 BLOBs. A hit's `snippet` is the passage
 without that title line (the fleet rule from thodel/eperiodica_mcp#8); `char_start`
 and `char_end` point into the cleaned article text.
@@ -192,7 +193,7 @@ Starting HLS MCP server on 0.0.0.0:8004/mcp/hls/mcp
 | `HLS_BM25_WEIGHTS` | `0,10,1,0.5,0.5,3,3` | bm25 column weights for `search_articles` — see [Ranking](#ranking) |
 | `GPUSTACK_BASE_URL` | `https://gpustack.unibe.ch/v1` | Embedding endpoint |
 | `GPUSTACK_API_KEY` | — | Required to embed queries for `search_semantic` |
-| `HLS_EMBED_MODEL` | `qwen3-embedding-0.6b` | Embedding model (1024 dimensions) |
+| `HLS_EMBED_MODEL` | `qwen3-embedding-4b` | Embedding model (2560 dimensions) |
 | `HLS_EMBED_BATCH` | `64` | Passages per embedding request |
 | `HLS_CHUNK_CHARS` / `HLS_CHUNK_OVERLAP` | `1000` / `150` | Passage windowing |
 | `HLS_EMBED_QUERY_PREFIX` | *(Qwen instruction)* | Instruction prefix for query embedding |
