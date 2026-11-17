@@ -27,6 +27,17 @@ def normalise_path(path):
 
 DEFAULT_HTTP_PATH = normalise_path(os.environ.get("HLS_HTTP_PATH", "/mcp"))
 
+#: Stateless streamable HTTP: every request gets a fresh transport and nothing
+#: is kept between requests. No tool here needs a session (no elicitation, no
+#: notifications, no per-client state). In the default stateful mode the SDK
+#: keeps every session until the client sends DELETE, and the Swiss History Bot
+#: never does: it opens one session per tool call (ch-h-bot api/mcp_client.py).
+#: On hsso_mcp that came to about 74 KB per call, linear, until the unit hit
+#: MemoryHigh, swapped and stopped answering (16.11.2026, hsso_mcp PR #2).
+#: tests/test_http_sessions.py holds the property; eval/session_memory.py
+#: measures it against a running server.
+STATELESS_HTTP = True
+
 db_module.set_db_path(DEFAULT_DB)
 
 mcp = MCPServer(
@@ -177,6 +188,19 @@ def resource_article(article_id: str) -> str:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def build_app(http_path: str, host: str):
+    """The ASGI app main() serves: the MCP endpoint behind the Basic-auth gate.
+
+    A function of its own so tests/test_http_sessions.py drives exactly what
+    production runs, gate and stateless flag included.
+    """
+    import auth
+    return auth.wrap(
+        mcp.streamable_http_app(streamable_http_path=http_path, host=host,
+                                stateless_http=STATELESS_HTTP),
+    )
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="HLS MCP server")
     ap.add_argument("--db",   default=DEFAULT_DB,   help="Path to hls.db (env HLS_DB)")
@@ -228,11 +252,8 @@ def main(argv=None):
     # between. streamable_http_app() hands back the same Starlette app, so the
     # transport behaves identically — only wrapped.
     import uvicorn
-    import auth
-    app = auth.wrap(
-        mcp.streamable_http_app(streamable_http_path=args.http_path, host=args.host),
-    )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(build_app(args.http_path, args.host),
+                host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
